@@ -35,7 +35,7 @@ pub enum Error {
     ReleaseNotYetAvailable = 5,
     NotDisputed = 6,
     TimeoutNotReached = 7,
-    ReleaseOnHoldPeriod = 7,
+    ReleaseOnHoldPeriod = 8,
 }
 
 #[contractevent]
@@ -101,6 +101,7 @@ pub struct Escrow {
     pub dispute_started_at: u64,
     pub last_activity_at: u64,
     pub escalation_level: u64,
+    pub min_hold_period: u64,
 }
 
 #[derive(Clone)]
@@ -109,7 +110,6 @@ pub struct Evidence {
     pub submitter: Address,
     pub ipfs_hash: String,
     pub submitted_at: u64,
-    pub min_hold_period: u64,
 }
 
 #[contract]

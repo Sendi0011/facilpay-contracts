@@ -580,7 +580,7 @@ fn test_submit_evidence_by_both_parties() {
     let merchant = Address::generate(&env);
     let token = Address::generate(&env);
     env.mock_all_auths();
-    let escrow_id = client.create_escrow(&customer, &merchant, &1000_i128, &token, &1500_u64);
+    let escrow_id = client.create_escrow(&customer, &merchant, &1000_i128, &token, &1500_u64, &0_u64);
     env.ledger().set_timestamp(1000);
     client.dispute_escrow(&customer, &escrow_id);
     env.ledger().set_timestamp(1200);
@@ -604,7 +604,7 @@ fn test_auto_resolve_to_customer_on_timeout() {
     let merchant = Address::generate(&env);
     let token = Address::generate(&env);
     env.mock_all_auths();
-    let escrow_id = client.create_escrow(&customer, &merchant, &1000_i128, &token, &1500_u64);
+    let escrow_id = client.create_escrow(&customer, &merchant, &1000_i128, &token, &1500_u64, &0_u64);
     env.ledger().set_timestamp(1000);
     client.dispute_escrow(&customer, &escrow_id);
     env.ledger().set_timestamp(1200);
@@ -624,13 +624,18 @@ fn test_auto_resolve_to_merchant_on_timeout() {
     let merchant = Address::generate(&env);
     let token = Address::generate(&env);
     env.mock_all_auths();
-    let escrow_id = client.create_escrow(&customer, &merchant, &1000_i128, &token, &1500_u64);
+    let escrow_id = client.create_escrow(&customer, &merchant, &1000_i128, &token, &1500_u64, &0_u64);
     env.ledger().set_timestamp(1000);
     client.dispute_escrow(&merchant, &escrow_id);
     env.ledger().set_timestamp(1200);
     client.submit_evidence(&merchant, &escrow_id, &String::from_str(&env, "ipfs://merch"));
     env.ledger().set_timestamp(1801);
     client.auto_resolve_dispute(&escrow_id);
+    let escrow = client.get_escrow(&escrow_id);
+    assert_eq!(escrow.status, EscrowStatus::Released);
+}
+
+#[test]
 #[should_panic]
 fn test_release_blocked_by_min_hold_period() {
     let env = Env::default();
@@ -781,7 +786,7 @@ fn test_escalate_dispute() {
     let merchant = Address::generate(&env);
     let token = Address::generate(&env);
     env.mock_all_auths();
-    let escrow_id = client.create_escrow(&customer, &merchant, &1000_i128, &token, &1500_u64);
+    let escrow_id = client.create_escrow(&customer, &merchant, &1000_i128, &token, &1500_u64, &0_u64);
     env.ledger().set_timestamp(1000);
     client.dispute_escrow(&customer, &escrow_id);
     client.escalate_dispute(&customer, &escrow_id);
@@ -790,6 +795,9 @@ fn test_escalate_dispute() {
     client.escalate_dispute(&merchant, &escrow_id);
     escrow = client.get_escrow(&escrow_id);
     assert_eq!(escrow.escalation_level, 2);
+}
+
+#[test]
 #[should_panic]
 fn test_release_when_only_release_timestamp_passed() {
     let env = Env::default();
