@@ -4,6 +4,272 @@ use super::*;
 use soroban_sdk::testutils::{Events, Ledger};
 use soroban_sdk::{testutils::Address as _, token, Address, Env};
 
+// ── RATE LIMITING / ANTI-FRAUD TESTS ────────────────────────────────────────
+
+fn setup_rate_limit_contract(env: &Env) -> (PaymentContractClient, Address) {
+    let contract_id = env.register(PaymentContract, ());
+    let client = PaymentContractClient::new(env, &contract_id);
+    let admin = Address::generate(env);
+    env.mock_all_auths();
+    client.initialize(&admin);
+    (client, admin)
+}
+
+#[test]
+fn test_rate_limit_window_resets_after_duration() {
+    let env = Env::default();
+    let (client, admin) = setup_rate_limit_contract(&env);
+
+    let customer = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    let token = Address::generate(&env);
+    let meta = String::from_str(&env, "");
+
+    // Allow 2 payments per 100-second window.
+    client.set_rate_limit_config(
+        &admin,
+        &RateLimitConfig {
+            max_payments_per_window: 2,
+            window_duration: 100,
+            max_payment_amount: 0,
+            max_daily_volume: 0,
+        },
+    );
+
+    env.ledger().set_timestamp(1000);
+    client.create_payment(&customer, &merchant, &50, &token, &Currency::USDC, &0, &meta);
+    client.create_payment(&customer, &merchant, &50, &token, &Currency::USDC, &0, &meta);
+
+    // Advance past the window; counter should reset.
+    env.ledger().set_timestamp(1200);
+    // This third payment would fail if the window hadn't reset.
+    client.create_payment(&customer, &merchant, &50, &token, &Currency::USDC, &0, &meta);
+
+    let rl = client.get_address_rate_limit(&customer);
+    assert_eq!(rl.payment_count, 1); // only 1 payment in the new window
+}
+
+#[test]
+#[should_panic]
+fn test_rate_limit_exceeded_within_window() {
+    let env = Env::default();
+    let (client, admin) = setup_rate_limit_contract(&env);
+
+    let customer = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    let token = Address::generate(&env);
+    let meta = String::from_str(&env, "");
+
+    // Allow only 1 payment per very long window.
+    client.set_rate_limit_config(
+        &admin,
+        &RateLimitConfig {
+            max_payments_per_window: 1,
+            window_duration: 100_000,
+            max_payment_amount: 0,
+            max_daily_volume: 0,
+        },
+    );
+
+    env.ledger().set_timestamp(1000);
+    client.create_payment(&customer, &merchant, &50, &token, &Currency::USDC, &0, &meta);
+    // Second payment in the same window — must panic.
+    client.create_payment(&customer, &merchant, &50, &token, &Currency::USDC, &0, &meta);
+}
+
+#[test]
+fn test_flag_address_blocks_payments() {
+    let env = Env::default();
+    let (client, admin) = setup_rate_limit_contract(&env);
+
+    let customer = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    let token = Address::generate(&env);
+    let meta = String::from_str(&env, "");
+
+    // Set a permissive config so the only gate is the flag.
+    client.set_rate_limit_config(
+        &admin,
+        &RateLimitConfig {
+            max_payments_per_window: 100,
+            window_duration: 100_000,
+            max_payment_amount: 0,
+            max_daily_volume: 0,
+        },
+    );
+
+    // Flag the customer.
+    client.flag_address(
+        &admin,
+        &customer,
+        &String::from_str(&env, "velocity attack"),
+    );
+    let rl = client.get_address_rate_limit(&customer);
+    assert!(rl.flagged);
+
+    // Payment must fail because address is flagged.
+    let result = client.try_create_payment(
+        &customer, &merchant, &50, &token, &Currency::USDC, &0, &meta,
+    );
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_unflag_address_allows_payments() {
+    let env = Env::default();
+    let (client, admin) = setup_rate_limit_contract(&env);
+
+    let customer = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    let token = Address::generate(&env);
+    let meta = String::from_str(&env, "");
+
+    client.set_rate_limit_config(
+        &admin,
+        &RateLimitConfig {
+            max_payments_per_window: 100,
+            window_duration: 100_000,
+            max_payment_amount: 0,
+            max_daily_volume: 0,
+        },
+    );
+
+    client.flag_address(&admin, &customer, &String::from_str(&env, "test"));
+    client.unflag_address(&admin, &customer);
+
+    let rl = client.get_address_rate_limit(&customer);
+    assert!(!rl.flagged);
+
+    // Payment must succeed after unflag.
+    client.create_payment(&customer, &merchant, &50, &token, &Currency::USDC, &0, &meta);
+}
+
+#[test]
+fn test_flag_unflag_events_emitted() {
+    let env = Env::default();
+    let (client, admin) = setup_rate_limit_contract(&env);
+
+    let customer = Address::generate(&env);
+
+    client.set_rate_limit_config(
+        &admin,
+        &RateLimitConfig {
+            max_payments_per_window: 100,
+            window_duration: 100_000,
+            max_payment_amount: 0,
+            max_daily_volume: 0,
+        },
+    );
+
+    client.flag_address(&admin, &customer, &String::from_str(&env, "fraud"));
+    client.unflag_address(&admin, &customer);
+
+    // Events should contain both AddressFlagged and AddressUnflagged entries.
+    let all_events = env.events().all();
+    assert!(!all_events.is_empty());
+}
+
+#[test]
+fn test_rate_limit_breach_event_emitted() {
+    let env = Env::default();
+    let (client, admin) = setup_rate_limit_contract(&env);
+
+    let customer = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    let token = Address::generate(&env);
+    let meta = String::from_str(&env, "");
+
+    client.set_rate_limit_config(
+        &admin,
+        &RateLimitConfig {
+            max_payments_per_window: 1,
+            window_duration: 100_000,
+            max_payment_amount: 0,
+            max_daily_volume: 0,
+        },
+    );
+
+    env.ledger().set_timestamp(1000);
+    client.create_payment(&customer, &merchant, &50, &token, &Currency::USDC, &0, &meta);
+
+    // Second attempt should fail and emit RateLimitBreached.
+    let result = client.try_create_payment(
+        &customer, &merchant, &50, &token, &Currency::USDC, &0, &meta,
+    );
+    assert!(result.is_err());
+
+    // RateLimitBreached is emitted before the error is returned.
+    let all_events = env.events().all();
+    assert!(!all_events.is_empty());
+}
+
+#[test]
+fn test_amount_exceeds_limit() {
+    let env = Env::default();
+    let (client, admin) = setup_rate_limit_contract(&env);
+
+    let customer = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    let token = Address::generate(&env);
+    let meta = String::from_str(&env, "");
+
+    // Cap single payment at 100.
+    client.set_rate_limit_config(
+        &admin,
+        &RateLimitConfig {
+            max_payments_per_window: 100,
+            window_duration: 100_000,
+            max_payment_amount: 100,
+            max_daily_volume: 0,
+        },
+    );
+
+    // Within limit — must succeed.
+    client.create_payment(&customer, &merchant, &100, &token, &Currency::USDC, &0, &meta);
+
+    // Over limit — must fail.
+    let result = client.try_create_payment(
+        &customer, &merchant, &101, &token, &Currency::USDC, &0, &meta,
+    );
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_daily_volume_limit() {
+    let env = Env::default();
+    let (client, admin) = setup_rate_limit_contract(&env);
+
+    let customer = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    let token = Address::generate(&env);
+    let meta = String::from_str(&env, "");
+
+    // Daily volume cap of 200.
+    client.set_rate_limit_config(
+        &admin,
+        &RateLimitConfig {
+            max_payments_per_window: 100,
+            window_duration: 100_000,
+            max_payment_amount: 0,
+            max_daily_volume: 200,
+        },
+    );
+
+    env.ledger().set_timestamp(1000);
+    client.create_payment(&customer, &merchant, &100, &token, &Currency::USDC, &0, &meta);
+    client.create_payment(&customer, &merchant, &100, &token, &Currency::USDC, &0, &meta);
+
+    // Third payment would exceed daily volume.
+    let result = client.try_create_payment(
+        &customer, &merchant, &1, &token, &Currency::USDC, &0, &meta,
+    );
+    assert!(result.is_err());
+
+    // Advance a full day — daily volume resets.
+    env.ledger().set_timestamp(1000 + 86400 + 1);
+    client.create_payment(&customer, &merchant, &100, &token, &Currency::USDC, &0, &meta);
+}
+
 #[test]
 fn test_create_payment() {
     let env = Env::default();

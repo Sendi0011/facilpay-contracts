@@ -22,6 +22,8 @@ pub enum DataKey {
     CustomerSubscriptionCount(Address),
     MerchantSubscriptions(Address, u64),
     MerchantSubscriptionCount(Address),
+    RateLimitConfig,
+    AddressRateLimit(Address),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -94,6 +96,10 @@ pub enum Error {
     PaymentNotDue = 15,
     MaxRetriesExceeded = 16,
     SubscriptionEnded = 17,
+    RateLimitExceeded = 20,
+    DailyVolumeExceeded = 21,
+    AddressFlagged = 22,
+    AmountExceedsLimit = 23,
 }
 
 #[contractevent]
@@ -173,6 +179,46 @@ pub struct SubscriptionResumed {
     pub next_payment_at: u64,
 }
 
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AddressFlagged {
+    pub address: Address,
+    pub reason: String,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AddressUnflagged {
+    pub address: Address,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RateLimitBreached {
+    pub address: Address,
+    pub payment_count: u32,
+}
+
+#[derive(Clone)]
+#[contracttype]
+pub struct RateLimitConfig {
+    pub max_payments_per_window: u32,
+    pub window_duration: u64,
+    pub max_payment_amount: i128,
+    pub max_daily_volume: i128,
+}
+
+#[derive(Clone)]
+#[contracttype]
+pub struct AddressRateLimit {
+    pub address: Address,
+    pub payment_count: u32,
+    pub window_start: u64,
+    pub daily_volume: i128,
+    pub last_payment_at: u64,
+    pub flagged: bool,
+}
+
 #[derive(Clone)]
 #[contracttype]
 pub struct Payment {
@@ -197,6 +243,7 @@ pub struct PaymentContract;
 const MAX_METADATA_SIZE: u32 = 512;
 const MAX_NOTES_SIZE: u32 = 1024;
 const DEFAULT_MAX_RETRIES: u64 = 3;
+const SECONDS_PER_DAY: u64 = 86400;
 
 #[contractimpl]
 impl PaymentContract {
@@ -228,6 +275,9 @@ impl PaymentContract {
         if metadata.len() > MAX_METADATA_SIZE {
             return Err(Error::MetadataTooLarge);
         }
+
+        // Check rate limits and anti-fraud before processing
+        PaymentContract::check_rate_limit(&env, &customer, amount)?;
 
         let counter: u64 = env
             .storage()
@@ -1138,6 +1188,216 @@ impl PaymentContract {
         }
 
         result
+    }
+
+    // ── RATE LIMITING / ANTI-FRAUD METHODS ──────────────────────────────────
+
+    /// Admin sets the global rate limit configuration.
+    pub fn set_rate_limit_config(
+        env: Env,
+        admin: Address,
+        config: RateLimitConfig,
+    ) -> Result<(), Error> {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("Contract not initialized");
+        if admin != stored_admin {
+            return Err(Error::Unauthorized);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::RateLimitConfig, &config);
+        Ok(())
+    }
+
+    /// Returns the current rate limit configuration.
+    /// Defaults to unlimited if not yet configured.
+    pub fn get_rate_limit_config(env: Env) -> RateLimitConfig {
+        env.storage()
+            .instance()
+            .get(&DataKey::RateLimitConfig)
+            .unwrap_or(RateLimitConfig {
+                max_payments_per_window: 0,
+                window_duration: 0,
+                max_payment_amount: 0,
+                max_daily_volume: 0,
+            })
+    }
+
+    /// Returns the per-address rate limit state (or a zeroed default).
+    pub fn get_address_rate_limit(env: Env, address: Address) -> AddressRateLimit {
+        env.storage()
+            .instance()
+            .get(&DataKey::AddressRateLimit(address.clone()))
+            .unwrap_or(AddressRateLimit {
+                address: address.clone(),
+                payment_count: 0,
+                window_start: 0,
+                daily_volume: 0,
+                last_payment_at: 0,
+                flagged: false,
+            })
+    }
+
+    /// Admin flags a suspicious address, blocking it from creating payments.
+    pub fn flag_address(
+        env: Env,
+        admin: Address,
+        address: Address,
+        reason: String,
+    ) -> Result<(), Error> {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("Contract not initialized");
+        if admin != stored_admin {
+            return Err(Error::Unauthorized);
+        }
+        let mut rate_limit: AddressRateLimit = env
+            .storage()
+            .instance()
+            .get(&DataKey::AddressRateLimit(address.clone()))
+            .unwrap_or(AddressRateLimit {
+                address: address.clone(),
+                payment_count: 0,
+                window_start: 0,
+                daily_volume: 0,
+                last_payment_at: 0,
+                flagged: false,
+            });
+        rate_limit.flagged = true;
+        env.storage()
+            .instance()
+            .set(&DataKey::AddressRateLimit(address.clone()), &rate_limit);
+        AddressFlagged { address, reason }.publish(&env);
+        Ok(())
+    }
+
+    /// Admin removes the flag from an address, allowing it to create payments again.
+    pub fn unflag_address(
+        env: Env,
+        admin: Address,
+        address: Address,
+    ) -> Result<(), Error> {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("Contract not initialized");
+        if admin != stored_admin {
+            return Err(Error::Unauthorized);
+        }
+        let mut rate_limit: AddressRateLimit = env
+            .storage()
+            .instance()
+            .get(&DataKey::AddressRateLimit(address.clone()))
+            .unwrap_or(AddressRateLimit {
+                address: address.clone(),
+                payment_count: 0,
+                window_start: 0,
+                daily_volume: 0,
+                last_payment_at: 0,
+                flagged: false,
+            });
+        rate_limit.flagged = false;
+        env.storage()
+            .instance()
+            .set(&DataKey::AddressRateLimit(address.clone()), &rate_limit);
+        AddressUnflagged { address }.publish(&env);
+        Ok(())
+    }
+
+    /// Internal check called by create_payment. Validates the address against
+    /// the configured rate limits and updates per-address counters.
+    fn check_rate_limit(env: &Env, address: &Address, amount: i128) -> Result<(), Error> {
+        // If no config is set, rate limiting is disabled.
+        let config: Option<RateLimitConfig> =
+            env.storage().instance().get(&DataKey::RateLimitConfig);
+        let config = match config {
+            None => return Ok(()),
+            Some(c) => c,
+        };
+
+        let mut rate_limit: AddressRateLimit = env
+            .storage()
+            .instance()
+            .get(&DataKey::AddressRateLimit(address.clone()))
+            .unwrap_or(AddressRateLimit {
+                address: address.clone(),
+                payment_count: 0,
+                window_start: 0,
+                daily_volume: 0,
+                last_payment_at: 0,
+                flagged: false,
+            });
+
+        // Block flagged addresses immediately.
+        if rate_limit.flagged {
+            return Err(Error::AddressFlagged);
+        }
+
+        // Reject payment if it exceeds the single-transaction amount cap.
+        if config.max_payment_amount > 0 && amount > config.max_payment_amount {
+            return Err(Error::AmountExceedsLimit);
+        }
+
+        let now = env.ledger().timestamp();
+
+        // Reset daily volume counter when a calendar-day boundary is crossed.
+        if rate_limit.window_start > 0
+            && now / SECONDS_PER_DAY > rate_limit.window_start / SECONDS_PER_DAY
+        {
+            rate_limit.daily_volume = 0;
+        }
+
+        // Reset window payment counter when the window duration has elapsed.
+        if config.window_duration > 0
+            && rate_limit.window_start > 0
+            && now >= rate_limit.window_start + config.window_duration
+        {
+            rate_limit.payment_count = 0;
+            rate_limit.window_start = now;
+        } else if rate_limit.window_start == 0 {
+            // First payment — initialise the window.
+            rate_limit.window_start = now;
+        }
+
+        // Enforce per-window payment count limit.
+        if config.max_payments_per_window > 0
+            && rate_limit.payment_count >= config.max_payments_per_window
+        {
+            RateLimitBreached {
+                address: address.clone(),
+                payment_count: rate_limit.payment_count,
+            }
+            .publish(env);
+            return Err(Error::RateLimitExceeded);
+        }
+
+        // Enforce daily volume limit.
+        if config.max_daily_volume > 0 {
+            let new_volume = rate_limit.daily_volume.saturating_add(amount);
+            if new_volume > config.max_daily_volume {
+                return Err(Error::DailyVolumeExceeded);
+            }
+            rate_limit.daily_volume = new_volume;
+        }
+
+        // Record successful check: increment counters and persist.
+        rate_limit.payment_count += 1;
+        rate_limit.last_payment_at = now;
+
+        env.storage()
+            .instance()
+            .set(&DataKey::AddressRateLimit(address.clone()), &rate_limit);
+
+        Ok(())
     }
 }
 

@@ -4,6 +4,318 @@ use super::*;
 use soroban_sdk::testutils::Ledger;
 use soroban_sdk::{testutils::Address as _, Address, Env};
 
+// ── REPUTATION SYSTEM TESTS ──────────────────────────────────────────────────
+
+#[test]
+fn test_new_address_starts_at_neutral_score() {
+    let env = Env::default();
+    let contract_id = env.register(EscrowContract, ());
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let address = Address::generate(&env);
+    env.mock_all_auths();
+
+    let rep = client.get_reputation(&address);
+    assert_eq!(rep.score, 5000);
+    assert_eq!(rep.total_transactions, 0);
+    assert_eq!(rep.disputes_won, 0);
+    assert_eq!(rep.disputes_lost, 0);
+}
+
+#[test]
+fn test_reputation_increases_on_escrow_completion() {
+    let env = Env::default();
+    let contract_id = env.register(EscrowContract, ());
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let customer = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    env.mock_all_auths();
+
+    // Use default config (completion_reward = 100).
+    env.ledger().set_timestamp(2000);
+    let escrow_id = client.create_escrow(&customer, &merchant, &1000_i128, &token, &1000_u64, &0_u64);
+    client.release_escrow(&admin, &escrow_id, &true);
+
+    let merchant_rep = client.get_reputation(&merchant);
+    assert_eq!(merchant_rep.score, 5100); // 5000 + 100
+
+    let customer_rep = client.get_reputation(&customer);
+    assert_eq!(customer_rep.score, 5100);
+    assert_eq!(customer_rep.total_transactions, 1);
+}
+
+#[test]
+fn test_reputation_config_overrides_defaults() {
+    let env = Env::default();
+    let contract_id = env.register(EscrowContract, ());
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let customer = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    env.mock_all_auths();
+
+    client.set_reputation_config(
+        &admin,
+        &ReputationConfig {
+            win_reward: 300,
+            loss_penalty: 400,
+            completion_reward: 50,
+            dispute_initiation_penalty: 0,
+        },
+    );
+
+    env.ledger().set_timestamp(2000);
+    let escrow_id = client.create_escrow(&customer, &merchant, &1000_i128, &token, &1000_u64, &0_u64);
+    client.release_escrow(&admin, &escrow_id, &true);
+
+    // completion_reward is 50 now.
+    let merchant_rep = client.get_reputation(&merchant);
+    assert_eq!(merchant_rep.score, 5050);
+}
+
+#[test]
+fn test_reputation_after_dispute_win() {
+    let env = Env::default();
+    let contract_id = env.register(EscrowContract, ());
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let customer = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    env.mock_all_auths();
+
+    // Default config: win_reward=200, loss_penalty=200.
+    let escrow_id = client.create_escrow(&customer, &merchant, &1000_i128, &token, &5000_u64, &0_u64);
+    client.dispute_escrow(&customer, &escrow_id);
+
+    // Admin resolves in merchant's favour.
+    client.resolve_dispute(&admin, &escrow_id, &true);
+
+    let merchant_rep = client.get_reputation(&merchant);
+    assert_eq!(merchant_rep.score, 5200); // +200 win_reward
+    assert_eq!(merchant_rep.disputes_won, 1);
+
+    let customer_rep = client.get_reputation(&customer);
+    assert_eq!(customer_rep.score, 4800); // -200 loss_penalty
+    assert_eq!(customer_rep.disputes_lost, 1);
+}
+
+#[test]
+fn test_reputation_after_dispute_loss() {
+    let env = Env::default();
+    let contract_id = env.register(EscrowContract, ());
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let customer = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    env.mock_all_auths();
+
+    let escrow_id = client.create_escrow(&customer, &merchant, &1000_i128, &token, &5000_u64, &0_u64);
+    client.dispute_escrow(&merchant, &escrow_id);
+
+    // Admin resolves in customer's favour.
+    client.resolve_dispute(&admin, &escrow_id, &false);
+
+    let customer_rep = client.get_reputation(&customer);
+    assert_eq!(customer_rep.score, 5200); // +200 win_reward
+    assert_eq!(customer_rep.disputes_won, 1);
+
+    let merchant_rep = client.get_reputation(&merchant);
+    assert_eq!(merchant_rep.score, 4800); // -200 loss_penalty
+    assert_eq!(merchant_rep.disputes_lost, 1);
+}
+
+#[test]
+fn test_score_clamped_at_10000() {
+    let env = Env::default();
+    let contract_id = env.register(EscrowContract, ());
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let customer = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    env.mock_all_auths();
+
+    client.set_reputation_config(
+        &admin,
+        &ReputationConfig {
+            win_reward: 6000, // large enough to push score above 10000
+            loss_penalty: 200,
+            completion_reward: 100,
+            dispute_initiation_penalty: 0,
+        },
+    );
+
+    let escrow_id = client.create_escrow(&customer, &merchant, &500_i128, &token, &5000_u64, &0_u64);
+    client.dispute_escrow(&customer, &escrow_id);
+    client.resolve_dispute(&admin, &escrow_id, &true); // merchant wins
+
+    let merchant_rep = client.get_reputation(&merchant);
+    assert_eq!(merchant_rep.score, 10000); // clamped
+}
+
+#[test]
+fn test_score_clamped_at_zero() {
+    let env = Env::default();
+    let contract_id = env.register(EscrowContract, ());
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let customer = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    env.mock_all_auths();
+
+    client.set_reputation_config(
+        &admin,
+        &ReputationConfig {
+            win_reward: 200,
+            loss_penalty: 6000, // large enough to push score below 0
+            completion_reward: 100,
+            dispute_initiation_penalty: 0,
+        },
+    );
+
+    let escrow_id = client.create_escrow(&customer, &merchant, &500_i128, &token, &5000_u64, &0_u64);
+    client.dispute_escrow(&customer, &escrow_id);
+    client.resolve_dispute(&admin, &escrow_id, &true); // merchant wins, customer loses
+
+    let customer_rep = client.get_reputation(&customer);
+    assert_eq!(customer_rep.score, 0); // clamped
+}
+
+#[test]
+fn test_weighted_auto_resolve_merchant_wins_higher_reputation() {
+    let env = Env::default();
+    let contract_id = env.register(EscrowContract, ());
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let customer = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    env.mock_all_auths();
+
+    // Give merchant higher reputation than customer via a prior win.
+    client.set_reputation_config(
+        &admin,
+        &ReputationConfig {
+            win_reward: 3000, // push merchant to 8000
+            loss_penalty: 3000, // push customer to 2000
+            completion_reward: 0,
+            dispute_initiation_penalty: 0,
+        },
+    );
+
+    // First escrow to establish reputation difference.
+    let escrow_id1 = client.create_escrow(&customer, &merchant, &500_i128, &token, &5000_u64, &0_u64);
+    client.dispute_escrow(&customer, &escrow_id1);
+    client.resolve_dispute(&admin, &escrow_id1, &true); // merchant wins → merchant=8000, customer=2000
+
+    // Second escrow for the weighted auto-resolve test.
+    env.ledger().set_timestamp(100);
+    let escrow_id2 = client.create_escrow(&customer, &merchant, &500_i128, &token, &5000_u64, &0_u64);
+    client.dispute_escrow(&customer, &escrow_id2);
+
+    // Each party submits one piece of evidence.
+    env.ledger().set_timestamp(200);
+    client.submit_evidence(&customer, &escrow_id2, &String::from_str(&env, "ipfs://cust"));
+    client.submit_evidence(&merchant, &escrow_id2, &String::from_str(&env, "ipfs://merch"));
+
+    // After timeout, auto-resolve should favour merchant (higher reputation).
+    env.ledger().set_timestamp(800); // > 200 + 500 timeout
+    client.auto_resolve_dispute(&escrow_id2);
+
+    let escrow2 = client.get_escrow(&escrow_id2);
+    // merchant reputation (8000) > customer reputation (2000) → merchant wins
+    assert_eq!(escrow2.status, EscrowStatus::Released);
+}
+
+#[test]
+fn test_weighted_auto_resolve_customer_wins_higher_reputation() {
+    let env = Env::default();
+    let contract_id = env.register(EscrowContract, ());
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let customer = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    env.mock_all_auths();
+
+    client.set_reputation_config(
+        &admin,
+        &ReputationConfig {
+            win_reward: 3000,
+            loss_penalty: 3000,
+            completion_reward: 0,
+            dispute_initiation_penalty: 0,
+        },
+    );
+
+    // First escrow: customer wins → customer=8000, merchant=2000.
+    let escrow_id1 = client.create_escrow(&customer, &merchant, &500_i128, &token, &5000_u64, &0_u64);
+    client.dispute_escrow(&merchant, &escrow_id1);
+    client.resolve_dispute(&admin, &escrow_id1, &false); // customer wins
+
+    // Second escrow for weighted auto-resolve.
+    env.ledger().set_timestamp(100);
+    let escrow_id2 = client.create_escrow(&customer, &merchant, &500_i128, &token, &5000_u64, &0_u64);
+    client.dispute_escrow(&merchant, &escrow_id2);
+
+    env.ledger().set_timestamp(200);
+    client.submit_evidence(&customer, &escrow_id2, &String::from_str(&env, "ipfs://cust"));
+    client.submit_evidence(&merchant, &escrow_id2, &String::from_str(&env, "ipfs://merch"));
+
+    env.ledger().set_timestamp(800);
+    client.auto_resolve_dispute(&escrow_id2);
+
+    let escrow2 = client.get_escrow(&escrow_id2);
+    // customer reputation (8000) > merchant reputation (2000) → customer wins → Resolved
+    assert_eq!(escrow2.status, EscrowStatus::Resolved);
+}
+
+#[test]
+fn test_get_and_set_reputation_config() {
+    let env = Env::default();
+    let contract_id = env.register(EscrowContract, ());
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    env.mock_all_auths();
+
+    let config = ReputationConfig {
+        win_reward: 500,
+        loss_penalty: 300,
+        completion_reward: 150,
+        dispute_initiation_penalty: 75,
+    };
+    client.set_reputation_config(&admin, &config);
+
+    let retrieved = client.get_reputation_config();
+    assert_eq!(retrieved.win_reward, 500);
+    assert_eq!(retrieved.loss_penalty, 300);
+    assert_eq!(retrieved.completion_reward, 150);
+    assert_eq!(retrieved.dispute_initiation_penalty, 75);
+}
+
 #[test]
 fn test_create_escrow() {
     let env = Env::default();
