@@ -14,6 +14,8 @@ pub enum DataKey {
     MerchantEscrowCount(Address),
     EscrowEvidence(u64, u64),
     EscrowEvidenceCount(u64),
+    ReputationScore(Address),
+    ReputationConfig,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -85,6 +87,44 @@ pub struct EvidenceSubmitted {
 pub struct DisputeEscalated {
     pub escrow_id: u64,
     pub level: u64,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReputationUpdated {
+    pub address: Address,
+    pub old_score: i64,
+    pub new_score: i64,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReputationConfigUpdated {
+    pub win_reward: i64,
+    pub loss_penalty: i64,
+    pub completion_reward: i64,
+    pub dispute_initiation_penalty: i64,
+}
+
+#[derive(Clone)]
+#[contracttype]
+pub struct ReputationScore {
+    pub address: Address,
+    pub total_transactions: u32,
+    pub disputes_initiated: u32,
+    pub disputes_won: u32,
+    pub disputes_lost: u32,
+    pub score: i64,
+    pub last_updated: u64,
+}
+
+#[derive(Clone)]
+#[contracttype]
+pub struct ReputationConfig {
+    pub win_reward: i64,
+    pub loss_penalty: i64,
+    pub completion_reward: i64,
+    pub dispute_initiation_penalty: i64,
 }
 
 #[derive(Clone)]
@@ -248,6 +288,10 @@ impl EscrowContract {
         env.storage()
             .instance()
             .set(&DataKey::Escrow(escrow_id), &escrow);
+
+        // Update reputation for both parties on successful completion.
+        EscrowContract::update_reputation_on_completion(&env, &escrow.merchant);
+        EscrowContract::update_reputation_on_completion(&env, &escrow.customer);
 
         EscrowReleased {
             escrow_id,
@@ -420,25 +464,12 @@ impl EscrowContract {
         if now.saturating_sub(last) < timeout {
             return Err(Error::TimeoutNotReached);
         }
-        let total = EscrowContract::get_evidence_count(&env, escrow_id);
-        let mut cust: u64 = 0;
-        let mut merch: u64 = 0;
-        let mut i: u64 = 0;
-        while i < total {
-            if let Some(ev) = env
-                .storage()
-                .instance()
-                .get::<DataKey, Evidence>(&DataKey::EscrowEvidence(escrow_id, i))
-            {
-                if ev.submitter == escrow.customer {
-                    cust = cust.saturating_add(1);
-                } else if ev.submitter == escrow.merchant {
-                    merch = merch.saturating_add(1);
-                }
-            }
-            i += 1;
-        }
-        let release_to_merchant = merch > cust;
+        let release_to_merchant = EscrowContract::weighted_auto_resolve(&env, escrow_id);
+        let (winner, loser) = if release_to_merchant {
+            (escrow.merchant.clone(), escrow.customer.clone())
+        } else {
+            (escrow.customer.clone(), escrow.merchant.clone())
+        };
         escrow.status = if release_to_merchant {
             EscrowStatus::Released
         } else {
@@ -447,6 +478,7 @@ impl EscrowContract {
         env.storage()
             .instance()
             .set(&DataKey::Escrow(escrow_id), &escrow);
+        EscrowContract::update_reputation_on_dispute_outcome(&env, &winner, &loser);
         EscrowResolved {
             escrow_id,
             released_to_merchant: release_to_merchant,
@@ -486,6 +518,13 @@ impl EscrowContract {
         env.storage()
             .instance()
             .set(&DataKey::Escrow(escrow_id), &escrow);
+
+        let (winner, loser) = if release_to_merchant {
+            (escrow.merchant.clone(), escrow.customer.clone())
+        } else {
+            (escrow.customer.clone(), escrow.merchant.clone())
+        };
+        EscrowContract::update_reputation_on_dispute_outcome(&env, &winner, &loser);
 
         EscrowResolved {
             escrow_id,
@@ -579,6 +618,158 @@ impl EscrowContract {
             .instance()
             .get(&DataKey::MerchantEscrowCount(merchant))
             .unwrap_or(0)
+    }
+
+    // ── REPUTATION METHODS ───────────────────────────────────────────────────
+
+    /// Returns the reputation score for an address.
+    /// New addresses start at the neutral score of 5000.
+    pub fn get_reputation(env: Env, address: Address) -> ReputationScore {
+        EscrowContract::get_or_default_reputation(&env, &address)
+    }
+
+    /// Admin configures the reputation reward/penalty magnitudes.
+    pub fn set_reputation_config(
+        env: Env,
+        admin: Address,
+        config: ReputationConfig,
+    ) -> Result<(), Error> {
+        admin.require_auth();
+        env.storage()
+            .instance()
+            .set(&DataKey::ReputationConfig, &config);
+        ReputationConfigUpdated {
+            win_reward: config.win_reward,
+            loss_penalty: config.loss_penalty,
+            completion_reward: config.completion_reward,
+            dispute_initiation_penalty: config.dispute_initiation_penalty,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Returns the current reputation configuration.
+    /// Falls back to conservative defaults if not yet set.
+    pub fn get_reputation_config(env: Env) -> ReputationConfig {
+        EscrowContract::get_or_default_reputation_config(&env)
+    }
+
+    /// Internal helper: load reputation or return a neutral default.
+    fn get_or_default_reputation(env: &Env, address: &Address) -> ReputationScore {
+        env.storage()
+            .instance()
+            .get(&DataKey::ReputationScore(address.clone()))
+            .unwrap_or(ReputationScore {
+                address: address.clone(),
+                total_transactions: 0,
+                disputes_initiated: 0,
+                disputes_won: 0,
+                disputes_lost: 0,
+                score: 5000,
+                last_updated: 0,
+            })
+    }
+
+    /// Internal helper: load reputation config or return sensible defaults.
+    fn get_or_default_reputation_config(env: &Env) -> ReputationConfig {
+        env.storage()
+            .instance()
+            .get(&DataKey::ReputationConfig)
+            .unwrap_or(ReputationConfig {
+                win_reward: 200,
+                loss_penalty: 200,
+                completion_reward: 100,
+                dispute_initiation_penalty: 50,
+            })
+    }
+
+    /// Called when an escrow completes normally (released). Rewards the address
+    /// with `completion_reward` and increments their transaction count.
+    fn update_reputation_on_completion(env: &Env, address: &Address) {
+        let config = EscrowContract::get_or_default_reputation_config(env);
+        let mut rep = EscrowContract::get_or_default_reputation(env, address);
+        let old_score = rep.score;
+        rep.score = (rep.score + config.completion_reward).min(10000);
+        rep.total_transactions = rep.total_transactions.saturating_add(1);
+        rep.last_updated = env.ledger().timestamp();
+        env.storage()
+            .instance()
+            .set(&DataKey::ReputationScore(address.clone()), &rep);
+        ReputationUpdated {
+            address: address.clone(),
+            old_score,
+            new_score: rep.score,
+        }
+        .publish(env);
+    }
+
+    /// Called after a dispute is resolved. Applies win/loss deltas and clamps
+    /// scores to [0, 10000].
+    fn update_reputation_on_dispute_outcome(env: &Env, winner: &Address, loser: &Address) {
+        let config = EscrowContract::get_or_default_reputation_config(env);
+        let now = env.ledger().timestamp();
+
+        // Update winner.
+        let mut winner_rep = EscrowContract::get_or_default_reputation(env, winner);
+        let old_winner_score = winner_rep.score;
+        winner_rep.score = (winner_rep.score + config.win_reward).min(10000);
+        winner_rep.disputes_won = winner_rep.disputes_won.saturating_add(1);
+        winner_rep.last_updated = now;
+        env.storage()
+            .instance()
+            .set(&DataKey::ReputationScore(winner.clone()), &winner_rep);
+        ReputationUpdated {
+            address: winner.clone(),
+            old_score: old_winner_score,
+            new_score: winner_rep.score,
+        }
+        .publish(env);
+
+        // Update loser.
+        let mut loser_rep = EscrowContract::get_or_default_reputation(env, loser);
+        let old_loser_score = loser_rep.score;
+        loser_rep.score = (loser_rep.score - config.loss_penalty).max(0);
+        loser_rep.disputes_lost = loser_rep.disputes_lost.saturating_add(1);
+        loser_rep.last_updated = now;
+        env.storage()
+            .instance()
+            .set(&DataKey::ReputationScore(loser.clone()), &loser_rep);
+        ReputationUpdated {
+            address: loser.clone(),
+            old_score: old_loser_score,
+            new_score: loser_rep.score,
+        }
+        .publish(env);
+    }
+
+    /// Weighted auto-resolve: each piece of evidence contributes the submitter's
+    /// reputation score to their side's total weight rather than a raw count.
+    /// Returns `true` if the merchant side outweighs the customer side.
+    fn weighted_auto_resolve(env: &Env, escrow_id: u64) -> bool {
+        let escrow = EscrowContract::get_escrow(env, escrow_id);
+        let total = EscrowContract::get_evidence_count(env, escrow_id);
+
+        let mut customer_weight: i128 = 0;
+        let mut merchant_weight: i128 = 0;
+
+        let mut i: u64 = 0;
+        while i < total {
+            if let Some(ev) = env
+                .storage()
+                .instance()
+                .get::<DataKey, Evidence>(&DataKey::EscrowEvidence(escrow_id, i))
+            {
+                let rep = EscrowContract::get_or_default_reputation(env, &ev.submitter);
+                if ev.submitter == escrow.customer {
+                    customer_weight = customer_weight.saturating_add(rep.score as i128);
+                } else if ev.submitter == escrow.merchant {
+                    merchant_weight = merchant_weight.saturating_add(rep.score as i128);
+                }
+            }
+            i += 1;
+        }
+
+        merchant_weight > customer_weight
     }
 }
 
