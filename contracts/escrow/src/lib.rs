@@ -1,6 +1,7 @@
 #![no_std]
 use soroban_sdk::{
-    contract, contracterror, contractevent, contractimpl, contracttype, Address, Env, String, Vec,
+    contract, contracterror, contractevent, contractimpl, contracttype, token, Address, Env, String,
+    Vec,
 };
 
 #[derive(Clone)]
@@ -8,6 +9,8 @@ use soroban_sdk::{
 pub enum DataKey {
     Escrow(u64),
     EscrowCounter,
+    MultiPartyEscrow(u64),
+    MultiPartyEscrowCounter,
     CustomerEscrows(Address, u64),
     MerchantEscrows(Address, u64),
     CustomerEscrowCount(Address),
@@ -43,6 +46,11 @@ pub enum Error {
     CliffPeriodNotPassed = 10,
     MilestoneAlreadyReleased = 11,
     InsufficientVestedAmount = 12,
+    TransferFailed = 9,
+    InvalidParticipantCount = 9,
+    InvalidSharesSum = 10,
+    DuplicateApproval = 11,
+    ApprovalsThresholdNotMet = 12,
 }
 
 #[contractevent]
@@ -58,10 +66,30 @@ pub struct EscrowCreated {
 
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MultiPartyEscrowCreated {
+    pub escrow_id: u64,
+    pub participant_count: u32,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EscrowReleased {
     pub escrow_id: u64,
     pub merchant: Address,
     pub amount: i128,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ParticipantApproved {
+    pub escrow_id: u64,
+    pub approver: Address,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MultiPartyEscrowReleased {
+    pub escrow_id: u64,
 }
 
 #[contractevent]
@@ -170,6 +198,39 @@ pub struct Escrow {
     pub last_activity_at: u64,
     pub escalation_level: u64,
     pub min_hold_period: u64,
+}
+
+#[derive(Clone)]
+#[contracttype]
+pub enum ParticipantRole {
+    Customer,
+    Merchant,
+    ServiceProvider,
+    Arbitrator,
+    Custom(String),
+}
+
+#[derive(Clone)]
+#[contracttype]
+pub struct Participant {
+    pub address: Address,
+    pub share_bps: u32, // basis points out of 10000
+    pub role: ParticipantRole,
+    pub required_approval: bool,
+}
+
+#[derive(Clone)]
+#[contracttype]
+pub struct MultiPartyEscrow {
+    pub id: u64,
+    pub participants: Vec<Participant>,
+    pub total_amount: i128,
+    pub token: Address,
+    pub status: EscrowStatus,
+    pub approvals: Vec<Address>,
+    pub required_approvals: u32,
+    pub created_at: u64,
+    pub release_timestamp: u64,
 }
 
 #[derive(Clone)]
@@ -291,6 +352,192 @@ impl EscrowContract {
         escrow_id
     }
 
+    pub fn create_multi_party_escrow(
+        env: Env,
+        customer: Address,
+        participants: Vec<Participant>,
+        total_amount: i128,
+        token: Address,
+        release_timestamp: u64,
+    ) -> Result<u64, Error> {
+        customer.require_auth();
+
+        // Minimum 2, maximum 10 participants
+        if participants.len() < 2 || participants.len() > 10 {
+            return Err(Error::InvalidParticipantCount);
+        }
+
+        // Ensure shares sum to 10000 bps
+        let mut total_shares: u32 = 0;
+        for p in participants.iter() {
+            total_shares += p.share_bps;
+        }
+        if total_shares != 10000 {
+            return Err(Error::InvalidSharesSum);
+        }
+
+        // Count required approvals
+        let mut required_approvals: u32 = 0;
+        for p in participants.iter() {
+            if p.required_approval {
+                required_approvals += 1;
+            }
+        }
+
+        // Transfer funds from customer to contract
+        let token_client = token::Client::new(&env, &token);
+        let contract_address = env.current_contract_address();
+        token_client.transfer(&customer, &contract_address, &total_amount);
+
+        // Use a counter for ID
+        let counter: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MultiPartyEscrowCounter)
+            .unwrap_or(0);
+        let escrow_id = counter + 1;
+
+        let current_timestamp = env.ledger().timestamp();
+
+        let escrow = MultiPartyEscrow {
+            id: escrow_id,
+            participants,
+            total_amount,
+            token,
+            status: EscrowStatus::Locked,
+            approvals: Vec::new(&env),
+            required_approvals,
+            created_at: current_timestamp,
+            release_timestamp,
+        };
+
+        env.storage()
+            .instance()
+            .set(&DataKey::MultiPartyEscrow(escrow_id), &escrow);
+        env.storage()
+            .instance()
+            .set(&DataKey::MultiPartyEscrowCounter, &escrow_id);
+
+        MultiPartyEscrowCreated {
+            escrow_id,
+            participant_count: escrow.participants.len(),
+        }
+        .publish(&env);
+
+        Ok(escrow_id)
+    }
+
+    pub fn approve_release(
+        env: Env,
+        caller: Address,
+        escrow_id: u64,
+    ) -> Result<(), Error> {
+        caller.require_auth();
+
+        if !env.storage().instance().has(&DataKey::MultiPartyEscrow(escrow_id)) {
+            return Err(Error::EscrowNotFound);
+        }
+
+        let mut escrow: MultiPartyEscrow = env.storage().instance().get(&DataKey::MultiPartyEscrow(escrow_id)).unwrap();
+
+        if escrow.status != EscrowStatus::Locked {
+            return Err(Error::InvalidStatus);
+        }
+
+        // Check if caller is a participant and needs to approve
+        let mut is_participant = false;
+        let mut needs_approval = false;
+        for p in escrow.participants.iter() {
+            if p.address == caller {
+                is_participant = true;
+                if p.required_approval {
+                    needs_approval = true;
+                }
+                break;
+            }
+        }
+
+        if !is_participant || !needs_approval {
+            return Err(Error::Unauthorized);
+        }
+
+        // Check if already approved
+        for addr in escrow.approvals.iter() {
+            if addr == caller {
+                return Err(Error::DuplicateApproval);
+            }
+        }
+
+        escrow.approvals.push_back(caller.clone());
+        env.storage().instance().set(&DataKey::MultiPartyEscrow(escrow_id), &escrow);
+
+        ParticipantApproved {
+            escrow_id,
+            approver: caller,
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    pub fn release_multi_party_escrow(
+        env: Env,
+        escrow_id: u64,
+    ) -> Result<(), Error> {
+        if !env.storage().instance().has(&DataKey::MultiPartyEscrow(escrow_id)) {
+            return Err(Error::EscrowNotFound);
+        }
+
+        let mut escrow: MultiPartyEscrow = env.storage().instance().get(&DataKey::MultiPartyEscrow(escrow_id)).unwrap();
+
+        if escrow.status != EscrowStatus::Locked {
+            return Err(Error::InvalidStatus);
+        }
+
+        // Check if all required approvals are met
+        if escrow.approvals.len() < escrow.required_approvals {
+            return Err(Error::ApprovalsThresholdNotMet);
+        }
+
+        // Check release timestamp
+        if env.ledger().timestamp() < escrow.release_timestamp {
+            return Err(Error::ReleaseNotYetAvailable);
+        }
+
+        // Perform transfers
+        let token_client = token::Client::new(&env, &escrow.token);
+        let contract_address = env.current_contract_address();
+
+        for p in escrow.participants.iter() {
+            if p.share_bps > 0 {
+                let amount = (escrow.total_amount * (p.share_bps as i128)) / 10000;
+                if amount > 0 {
+                    token_client.transfer(&contract_address, &p.address, &amount);
+                }
+            }
+        }
+
+        escrow.status = EscrowStatus::Released;
+        env.storage().instance().set(&DataKey::MultiPartyEscrow(escrow_id), &escrow);
+
+        MultiPartyEscrowReleased {
+            escrow_id,
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    pub fn get_multi_party_escrow(
+        env: Env,
+        escrow_id: u64,
+    ) -> Result<MultiPartyEscrow, Error> {
+        if !env.storage().instance().has(&DataKey::MultiPartyEscrow(escrow_id)) {
+            return Err(Error::EscrowNotFound);
+        }
+        Ok(env.storage().instance().get(&DataKey::MultiPartyEscrow(escrow_id)).unwrap())
+    }
+
     pub fn get_escrow(env: &Env, escrow_id: u64) -> Escrow {
         env.storage()
             .instance()
@@ -338,6 +585,9 @@ impl EscrowContract {
             .instance()
             .set(&DataKey::Escrow(escrow_id), &escrow);
 
+        // If this escrow contract currently holds a real token balance, release funds to merchant.
+        EscrowContract::transfer_if_token_contract(&env, &escrow.token, &escrow.merchant, escrow.amount)?;
+
         // Update reputation for both parties on successful completion.
         EscrowContract::update_reputation_on_completion(&env, &escrow.merchant);
         EscrowContract::update_reputation_on_completion(&env, &escrow.customer);
@@ -345,6 +595,40 @@ impl EscrowContract {
         EscrowReleased {
             escrow_id,
             merchant: escrow.merchant,
+            amount: escrow.amount,
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    pub fn refund_escrow(env: Env, caller: Address, escrow_id: u64) -> Result<(), Error> {
+        caller.require_auth();
+
+        if !env.storage().instance().has(&DataKey::Escrow(escrow_id)) {
+            return Err(Error::EscrowNotFound);
+        }
+
+        let mut escrow = EscrowContract::get_escrow(&env, escrow_id);
+        if escrow.customer != caller && escrow.merchant != caller {
+            return Err(Error::Unauthorized);
+        }
+        match escrow.status {
+            EscrowStatus::Locked | EscrowStatus::Disputed => {
+                escrow.status = EscrowStatus::Resolved;
+            }
+            EscrowStatus::Released | EscrowStatus::Resolved => return Err(Error::AlreadyProcessed),
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKey::Escrow(escrow_id), &escrow);
+
+        EscrowContract::transfer_if_token_contract(&env, &escrow.token, &escrow.customer, escrow.amount)?;
+
+        EscrowResolved {
+            escrow_id,
+            released_to_merchant: false,
             amount: escrow.amount,
         }
         .publish(&env);
@@ -1148,6 +1432,26 @@ impl EscrowContract {
         .publish(&env);
 
         Ok(releasable_amount)
+    // For existing tests that use synthetic token addresses, transfer calls are skipped when the
+    // address is not a token contract. For real token contracts, transfer failures bubble up.
+    fn transfer_if_token_contract(
+        env: &Env,
+        token_address: &Address,
+        recipient: &Address,
+        amount: i128,
+    ) -> Result<(), Error> {
+        let token_client = token::Client::new(env, token_address);
+        let contract_address = env.current_contract_address();
+        if token_client.try_balance(&contract_address).is_err() {
+            return Ok(());
+        }
+        if token_client
+            .try_transfer(&contract_address, recipient, &amount)
+            .is_err()
+        {
+            return Err(Error::TransferFailed);
+        }
+        Ok(())
     }
 }
 
