@@ -1,14 +1,7 @@
 #![no_std]
 use soroban_sdk::{
-    contract,
-    contracterror,
-    contractevent,
-    contractimpl,
-    contracttype,
-    Address,
-    Env,
-    String,
-    Vec,
+    contract, contracterror, contractevent, contractimpl, contracttype, storage, token, Address,
+    BytesN, Env, String, Vec,
 };
 
 #[derive(Clone)]
@@ -26,8 +19,12 @@ pub enum DataKey {
     CustomerRefundCount(Address),
     PaymentRefunds(u64, u64),
     PaymentRefundCount(u64),
-    RefundPolicy(Address),
-    DefaultRefundPolicy,
+    ArbitrationCase(u64),
+    ArbitrationCounter,
+    ArbitratorList,
+    ArbitratorsVoted(u64),        // case_id -> Vec<Address>
+    ArbitratorVote(u64, Address), // case_id, arbitrator
+    PoolToken(u64),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -99,30 +96,32 @@ pub struct RefundRejected {
 
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RefundPolicySet {
-    pub merchant: Address,
-    pub refund_window: u64,
-}
-
-#[contractevent]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RefundPolicyDeactivated {
-    pub merchant: Address,
-}
-
-#[contractevent]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PolicyOverrideApplied {
+pub struct RefundEscalatedToArbitration {
     pub refund_id: u64,
-    pub admin: Address,
-    pub reason: String,
+    pub case_id: u64,
+    pub fee_pool: i128,
 }
 
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AutoApproved {
-    pub refund_id: u64,
-    pub amount: i128,
+pub struct ArbitrationVoteCast {
+    pub case_id: u64,
+    pub arbitrator: Address,
+    pub vote_for_refund: bool,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ArbitrationCaseDecided {
+    pub case_id: u64,
+    pub approved: bool,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ArbitrationFeesDistributed {
+    pub case_id: u64,
+    pub per_arbitrator: i128,
 }
 
 #[derive(Clone)]
@@ -140,15 +139,34 @@ pub struct Refund {
     pub reason: String,
 }
 
-#[derive(Clone)]
 #[contracttype]
-pub struct RefundPolicy {
-    pub merchant: Address,
-    pub refund_window: u64, // seconds from payment creation
-    pub max_refund_percentage: u32, // basis points (10000 = 100%)
-    pub requires_admin_approval: bool,
-    pub auto_approve_below: i128, // auto-approve refunds below this amount
-    pub active: bool,
+pub struct ArbitrationCase {
+    pub case_id: u64,
+    pub refund_id: u64,
+    pub arbitrators: Vec<Address>,
+    pub votes_for_refund: u32,
+    pub votes_against_refund: u32,
+    pub status: ArbitrationStatus,
+    pub created_at: u64,
+    pub deadline: u64,
+    pub fee_pool: i128,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+#[contracttype]
+pub enum ArbitrationStatus {
+    Open,
+    Decided,
+    Appealed,
+    Closed,
+}
+
+#[contracttype]
+pub struct ArbitratorVote {
+    pub arbitrator: Address,
+    pub voted_for_refund: bool,
+    pub reasoning_hash: BytesN<32>,
+    pub voted_at: u64,
 }
 
 #[contract]
@@ -253,12 +271,14 @@ impl RefundContract {
             .instance()
             .get(&DataKey::MerchantRefundCount(merchant.clone()))
             .unwrap_or(0);
-        env.storage()
-            .instance()
-            .set(&DataKey::MerchantRefunds(merchant.clone(), merchant_count), &refund_id);
-        env.storage()
-            .instance()
-            .set(&DataKey::MerchantRefundCount(merchant.clone()), &(merchant_count + 1));
+        env.storage().instance().set(
+            &DataKey::MerchantRefunds(merchant.clone(), merchant_count),
+            &refund_id,
+        );
+        env.storage().instance().set(
+            &DataKey::MerchantRefundCount(merchant.clone()),
+            &(merchant_count + 1),
+        );
 
         // Index refund by customer
         let customer_count: u64 = env
@@ -266,12 +286,14 @@ impl RefundContract {
             .instance()
             .get(&DataKey::CustomerRefundCount(customer.clone()))
             .unwrap_or(0);
-        env.storage()
-            .instance()
-            .set(&DataKey::CustomerRefunds(customer.clone(), customer_count), &refund_id);
-        env.storage()
-            .instance()
-            .set(&DataKey::CustomerRefundCount(customer.clone()), &(customer_count + 1));
+        env.storage().instance().set(
+            &DataKey::CustomerRefunds(customer.clone(), customer_count),
+            &refund_id,
+        );
+        env.storage().instance().set(
+            &DataKey::CustomerRefundCount(customer.clone()),
+            &(customer_count + 1),
+        );
 
         // Index refund by payment
         let payment_count: u64 = env
@@ -279,12 +301,14 @@ impl RefundContract {
             .instance()
             .get(&DataKey::PaymentRefundCount(payment_id))
             .unwrap_or(0);
-        env.storage()
-            .instance()
-            .set(&DataKey::PaymentRefunds(payment_id, payment_count), &refund_id);
-        env.storage()
-            .instance()
-            .set(&DataKey::PaymentRefundCount(payment_id), &(payment_count + 1));
+        env.storage().instance().set(
+            &DataKey::PaymentRefunds(payment_id, payment_count),
+            &refund_id,
+        );
+        env.storage().instance().set(
+            &DataKey::PaymentRefundCount(payment_id),
+            &(payment_count + 1),
+        );
 
         // Emit RefundRequested event
         (RefundRequested {
@@ -418,6 +442,258 @@ impl RefundContract {
         Ok(())
     }
 
+    pub fn register_arbitrator(env: Env, admin: Address, arbitrator: Address) -> Result<(), Error> {
+        admin.require_auth();
+        let stored_admin = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("Admin no set");
+        if admin != stored_admin {
+            return Err(Error::Unauthorized);
+        }
+        let mut list: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::ArbitratorList)
+            .unwrap_or(Vec::new(&env));
+        if list.contains(&arbitrator) {
+            return Err(Error::Unauthorized);
+        }
+        list.push_back(arbitrator);
+        env.storage()
+            .instance()
+            .set(&DataKey::ArbitratorList, &list);
+        Ok(())
+    }
+
+    pub fn escalate_to_arbitration(
+        env: Env,
+        caller: Address,
+        refund_id: u64,
+        fee_token: Address,
+        fee_amount: i128,
+    ) -> Result<u64, Error> {
+        caller.require_auth();
+
+        let refund: Refund = env
+            .storage()
+            .instance()
+            .get(&DataKey::Refund(refund_id))
+            .ok_or(Error::RefundNotFound)?;
+        if refund.status != RefundStatus::Rejected {
+            return Err(Error::InvalidStatus);
+        }
+        if fee_amount <= 0 {
+            return Err(Error::InvalidAmount);
+        }
+
+        let counter: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::ArbitrationCounter)
+            .unwrap_or(0);
+        let case_id = counter + 1;
+
+        let arbitrators = env
+            .storage()
+            .instance()
+            .get(&DataKey::ArbitratorList)
+            .unwrap_or(Vec::new(&env));
+        if arbitrators.len() < 3 {
+            return Err(Error::QuorumNotReached);
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKey::PoolToken(case_id), &fee_token.clone());
+        let token_client = token::Client::new(&env, &fee_token);
+        token_client.transfer(&caller, &env.current_contract_address(), &fee_amount);
+
+        let case = ArbitrationCase {
+            case_id,
+            refund_id,
+            arbitrators: arbitrators.clone(),
+            votes_for_refund: 0,
+            votes_against_refund: 0,
+            status: ArbitrationStatus::Open,
+            created_at: env.ledger().timestamp(),
+            deadline: env.ledger().timestamp() + 86400 * 7, // 7 days example
+            fee_pool: fee_amount,
+        };
+
+        env.storage()
+            .instance()
+            .set(&DataKey::ArbitrationCase(case_id), &case);
+        env.storage()
+            .instance()
+            .set(&DataKey::ArbitrationCounter, &case_id);
+
+        RefundEscalatedToArbitration {
+            refund_id,
+            case_id,
+            fee_pool: fee_amount,
+        }
+        .publish(&env);
+
+        Ok(case_id)
+    }
+
+    pub fn cast_arbitration_vote(
+        env: Env,
+        arbitrator: Address,
+        case_id: u64,
+        vote_for_refund: bool,
+        reasoning_hash: BytesN<32>,
+    ) -> Result<(), Error> {
+        arbitrator.require_auth();
+
+        let mut case: ArbitrationCase = env
+            .storage()
+            .instance()
+            .get(&DataKey::ArbitrationCase(case_id))
+            .ok_or(Error::RefundNotFound)?;
+        if case.status != ArbitrationStatus::Open {
+            return Err(Error::InvalidStatus);
+        }
+        if env.ledger().timestamp() > case.deadline {
+            return Err(Error::InvalidStatus);
+        }
+        if !case.arbitrators.contains(&arbitrator) {
+            return Err(Error::NotArbitrator);
+        }
+        if env
+            .storage()
+            .instance()
+            .has(&DataKey::ArbitratorVote(case_id, arbitrator.clone()))
+        {
+            return Err(Error::AlreadyProcessed);
+        }
+
+        let refund: Refund = env
+            .storage()
+            .instance()
+            .get(&DataKey::Refund(case.refund_id))
+            .unwrap();
+        if arbitrator == refund.merchant || arbitrator == refund.customer {
+            return Err(Error::Unauthorized);
+        }
+
+        let vote = ArbitratorVote {
+            arbitrator: arbitrator.clone(),
+            voted_for_refund: vote_for_refund,
+            reasoning_hash,
+            voted_at: env.ledger().timestamp(),
+        };
+        env.storage()
+            .instance()
+            .set(&DataKey::ArbitratorVote(case_id, arbitrator.clone()), &vote);
+
+        let mut voted: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::ArbitratorsVoted(case_id))
+            .unwrap_or_else(|| Vec::new(&env));
+        if !voted.contains(&arbitrator) {
+            voted.push_back(arbitrator.clone());
+            env.storage()
+                .instance()
+                .set(&DataKey::ArbitratorsVoted(case_id), &voted);
+        }
+
+        if vote_for_refund {
+            case.votes_for_refund += 1;
+        } else {
+            case.votes_against_refund += 1;
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::ArbitrationCase(case_id), &case);
+
+        ArbitrationVoteCast {
+            case_id,
+            arbitrator,
+            vote_for_refund,
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    pub fn close_arbitration_case(env: Env, case_id: u64) -> Result<(), Error> {
+        let mut case: ArbitrationCase = env
+            .storage()
+            .instance()
+            .get(&DataKey::ArbitrationCase(case_id))
+            .ok_or(Error::RefundNotFound)?;
+        if case.status != ArbitrationStatus::Open {
+            return Err(Error::InvalidStatus);
+        }
+
+        let total_votes = case.votes_for_refund + case.votes_against_refund;
+        if total_votes < 3 {
+            return Err(Error::InvalidStatus);
+        } // quorum
+
+        let approved = case.votes_for_refund > case.votes_against_refund;
+
+        case.status = ArbitrationStatus::Decided;
+        env.storage()
+            .instance()
+            .set(&DataKey::ArbitrationCase(case_id), &case);
+
+        // Update refund status if approved
+        if approved {
+            let mut refund: Refund = env
+                .storage()
+                .instance()
+                .get(&DataKey::Refund(case.refund_id))
+                .unwrap();
+            refund.status = RefundStatus::Approved;
+            env.storage()
+                .instance()
+                .set(&DataKey::Refund(case.refund_id), &refund);
+        }
+
+        // Distribute fees equally to voting arbitrators
+        let num_voters = total_votes as i128;
+        if num_voters > 0 {
+            let pool_token: Address = env
+                .storage()
+                .instance()
+                .get(&DataKey::PoolToken(case_id))
+                .unwrap();
+            let token_client = token::Client::new(&env, &pool_token);
+
+            let arbitrators: Vec<Address> = env
+                .storage()
+                .instance()
+                .get(&DataKey::ArbitratorsVoted(case_id))
+                .unwrap_or_else(|| Vec::new(&env));
+            let arbitrator_fee = case.fee_pool / (arbitrators.len() as i128);
+
+            for arbitrator in arbitrators {
+                token_client.transfer(&env.current_contract_address(), arbitrator, &arbitrator_fee);
+            }
+            ArbitrationFeesDistributed {
+                case_id,
+                per_arbitrator: arbitrator_fee,
+            }
+            .publish(&env);
+        }
+
+        ArbitrationCaseDecided { case_id, approved }.publish(&env);
+
+        Ok(())
+    }
+
+    pub fn get_arbitration_case(env: Env, case_id: u64) -> Result<ArbitrationCase, Error> {
+        env.storage()
+            .instance()
+            .get(&DataKey::ArbitrationCase(case_id))
+            .ok_or(Error::RefundNotFound)
+    }
+
     pub fn get_refunds_by_status(
         env: &Env,
         status: RefundStatus,
@@ -465,7 +741,11 @@ impl RefundContract {
 
         let mut id: u64 = 1;
         while id <= total_refunds {
-            if let Some(refund) = env.storage().instance().get::<_, Refund>(&DataKey::Refund(id)) {
+            if let Some(refund) = env
+                .storage()
+                .instance()
+                .get::<_, Refund>(&DataKey::Refund(id))
+            {
                 if refund.payment_id == payment_id && refund.status == RefundStatus::Processed {
                     total += refund.amount;
                 }
@@ -672,10 +952,13 @@ impl RefundContract {
                 .instance()
                 .get(&DataKey::RefundsByStatus(status.clone(), last_index))
                 .ok_or(Error::InvalidStatus)?;
+            env.storage().instance().set(
+                &DataKey::RefundsByStatus(status.clone(), index),
+                &last_refund_id,
+            );
             env.storage()
                 .instance()
-                .set(&DataKey::RefundsByStatus(status.clone(), index), &last_refund_id);
-            env.storage().instance().set(&DataKey::RefundStatusIndex(last_refund_id), &index);
+                .set(&DataKey::RefundStatusIndex(last_refund_id), &index);
         }
 
         env.storage().instance().remove(&DataKey::RefundsByStatus(status.clone(), last_index));
