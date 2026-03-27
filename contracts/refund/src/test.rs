@@ -1,7 +1,10 @@
 #![cfg(test)]
 
 use super::*;
-use soroban_sdk::{testutils::Address as _, testutils::Events, Address, Env, String};
+use soroban_sdk::{
+    testutils::{Address as _, Events, Ledger},
+    token, Address, Env, String,
+};
 
 #[test]
 fn test_request_refund_with_valid_data() {
@@ -18,8 +21,15 @@ fn test_request_refund_with_valid_data() {
 
     env.mock_all_auths();
 
-    let refund_id = client
-        .request_refund(&merchant, &payment_id, &customer, &amount, &amount, &token, &reason);
+    let refund_id = client.request_refund(
+        &merchant,
+        &payment_id,
+        &customer,
+        &amount,
+        &amount,
+        &token,
+        &reason,
+    );
 
     assert_eq!(refund_id, 1u64);
 }
@@ -41,11 +51,25 @@ fn test_refund_id_increments_correctly() {
     let reason = String::from_str(&env, "Test reason");
 
     env.mock_all_auths();
-    let refund_id1 = client
-        .request_refund(&merchant1, &payment_id1, &customer1, &amount, &amount, &token, &reason);
+    let refund_id1 = client.request_refund(
+        &merchant1,
+        &payment_id1,
+        &customer1,
+        &amount,
+        &amount,
+        &token,
+        &reason,
+    );
 
-    let refund_id2 = client
-        .request_refund(&merchant2, &payment_id2, &customer2, &amount, &amount, &token, &reason);
+    let refund_id2 = client.request_refund(
+        &merchant2,
+        &payment_id2,
+        &customer2,
+        &amount,
+        &amount,
+        &token,
+        &reason,
+    );
 
     assert_eq!(refund_id1, 1u64);
     assert_eq!(refund_id2, 2u64);
@@ -65,8 +89,15 @@ fn test_get_refund_by_id() {
     let reason = String::from_str(&env, "Test reason");
 
     env.mock_all_auths();
-    let refund_id = client
-        .request_refund(&merchant, &payment_id, &customer, &amount, &amount, &token, &reason);
+    let refund_id = client.request_refund(
+        &merchant,
+        &payment_id,
+        &customer,
+        &amount,
+        &amount,
+        &token,
+        &reason,
+    );
 
     let refund = client.get_refund(&refund_id);
 
@@ -103,14 +134,35 @@ fn test_request_multiple_refunds_and_retrieve_each() {
     let reason = String::from_str(&env, "Test reason");
 
     env.mock_all_auths();
-    let refund_id1 = client
-        .request_refund(&merchant1, &payment_id1, &customer1, &amount1, &amount1, &token, &reason);
+    let refund_id1 = client.request_refund(
+        &merchant1,
+        &payment_id1,
+        &customer1,
+        &amount1,
+        &amount1,
+        &token,
+        &reason,
+    );
 
-    let refund_id2 = client
-        .request_refund(&merchant2, &payment_id2, &customer2, &amount2, &amount2, &token, &reason);
+    let refund_id2 = client.request_refund(
+        &merchant2,
+        &payment_id2,
+        &customer2,
+        &amount2,
+        &amount2,
+        &token,
+        &reason,
+    );
 
-    let refund_id3 = client
-        .request_refund(&merchant3, &payment_id3, &customer3, &amount3, &amount3, &token, &reason);
+    let refund_id3 = client.request_refund(
+        &merchant3,
+        &payment_id3,
+        &customer3,
+        &amount3,
+        &amount3,
+        &token,
+        &reason,
+    );
 
     let refund1 = client.get_refund(&refund_id1);
     let refund2 = client.get_refund(&refund_id2);
@@ -144,8 +196,15 @@ fn test_request_refund_with_zero_amount_should_fail() {
     let reason = String::from_str(&env, "Test reason");
 
     env.mock_all_auths();
-    client
-        .request_refund(&merchant, &payment_id, &customer, &amount, &amount, &token, &reason);
+    client.request_refund(
+        &merchant,
+        &payment_id,
+        &customer,
+        &amount,
+        &amount,
+        &token,
+        &reason,
+    );
 }
 
 #[test]
@@ -163,8 +222,15 @@ fn test_request_refund_with_negative_amount_should_fail() {
     let reason = String::from_str(&env, "Test reason");
 
     env.mock_all_auths();
-    client
-        .request_refund(&merchant, &payment_id, &customer, &amount, &amount, &token, &reason);
+    client.request_refund(
+        &merchant,
+        &payment_id,
+        &customer,
+        &amount,
+        &amount,
+        &token,
+        &reason,
+    );
 }
 
 #[test]
@@ -182,8 +248,15 @@ fn test_request_refund_with_invalid_payment_id_should_fail() {
     let reason = String::from_str(&env, "Test reason");
 
     env.mock_all_auths();
-    client
-        .request_refund(&merchant, &payment_id, &customer, &amount, &amount, &token, &reason);
+    client.request_refund(
+        &merchant,
+        &payment_id,
+        &customer,
+        &amount,
+        &amount,
+        &token,
+        &reason,
+    );
 }
 
 #[test]
@@ -211,8 +284,15 @@ fn test_refund_requested_event_is_emitted() {
     let reason = String::from_str(&env, "Test reason");
 
     env.mock_all_auths();
-    let _refund_id = client
-        .request_refund(&merchant, &payment_id, &customer, &amount, &amount, &token, &reason);
+    let _refund_id = client.request_refund(
+        &merchant,
+        &payment_id,
+        &customer,
+        &amount,
+        &amount,
+        &token,
+        &reason,
+    );
 
     // Check that the event was emitted
     let events = env.events().all();
@@ -237,8 +317,15 @@ fn test_refund_stored_with_requested_status() {
     let reason = String::from_str(&env, "Test reason");
 
     env.mock_all_auths();
-    let refund_id = client
-        .request_refund(&merchant, &payment_id, &customer, &amount, &amount, &token, &reason);
+    let refund_id = client.request_refund(
+        &merchant,
+        &payment_id,
+        &customer,
+        &amount,
+        &amount,
+        &token,
+        &reason,
+    );
 
     let refund = client.get_refund(&refund_id);
     assert_eq!(refund.status, RefundStatus::Requested);
@@ -258,8 +345,15 @@ fn test_request_refund_without_reason() {
     let reason = String::from_str(&env, ""); // Empty reason
 
     env.mock_all_auths();
-    let refund_id = client
-        .request_refund(&merchant, &payment_id, &customer, &amount, &amount, &token, &reason);
+    let refund_id = client.request_refund(
+        &merchant,
+        &payment_id,
+        &customer,
+        &amount,
+        &amount,
+        &token,
+        &reason,
+    );
 
     let refund = client.get_refund(&refund_id);
     assert_eq!(refund.reason, String::from_str(&env, ""));
@@ -280,8 +374,15 @@ fn test_request_refund_with_reason() {
     let reason = String::from_str(&env, "Customer not satisfied with product quality");
 
     env.mock_all_auths();
-    let refund_id = client
-        .request_refund(&merchant, &payment_id, &customer, &amount, &amount, &token, &reason);
+    let refund_id = client.request_refund(
+        &merchant,
+        &payment_id,
+        &customer,
+        &amount,
+        &amount,
+        &token,
+        &reason,
+    );
 
     let refund = client.get_refund(&refund_id);
     assert_eq!(refund.reason, reason);
@@ -305,8 +406,15 @@ fn test_approve_requested_refund_successfully() {
 
     env.mock_all_auths();
 
-    let refund_id = client
-        .request_refund(&merchant, &payment_id, &customer, &amount, &amount, &token, &reason);
+    let refund_id = client.request_refund(
+        &merchant,
+        &payment_id,
+        &customer,
+        &amount,
+        &amount,
+        &token,
+        &reason,
+    );
 
     client.approve_refund(&admin, &refund_id);
 
@@ -331,8 +439,15 @@ fn test_reject_requested_refund_successfully() {
 
     env.mock_all_auths();
 
-    let refund_id = client
-        .request_refund(&merchant, &payment_id, &customer, &amount, &amount, &token, &reason);
+    let refund_id = client.request_refund(
+        &merchant,
+        &payment_id,
+        &customer,
+        &amount,
+        &amount,
+        &token,
+        &reason,
+    );
 
     client.reject_refund(&admin, &refund_id, &rejection_reason);
 
@@ -386,8 +501,15 @@ fn test_approve_already_approved_refund_should_fail() {
 
     env.mock_all_auths();
 
-    let refund_id = client
-        .request_refund(&merchant, &payment_id, &customer, &amount, &amount, &token, &reason);
+    let refund_id = client.request_refund(
+        &merchant,
+        &payment_id,
+        &customer,
+        &amount,
+        &amount,
+        &token,
+        &reason,
+    );
 
     client.approve_refund(&admin, &refund_id);
     client.approve_refund(&admin, &refund_id);
@@ -411,8 +533,15 @@ fn test_reject_already_rejected_refund_should_fail() {
 
     env.mock_all_auths();
 
-    let refund_id = client
-        .request_refund(&merchant, &payment_id, &customer, &amount, &amount, &token, &reason);
+    let refund_id = client.request_refund(
+        &merchant,
+        &payment_id,
+        &customer,
+        &amount,
+        &amount,
+        &token,
+        &reason,
+    );
 
     client.reject_refund(&admin, &refund_id, &rejection_reason);
     client.reject_refund(&admin, &refund_id, &rejection_reason);
@@ -436,8 +565,15 @@ fn test_approve_rejected_refund_should_fail() {
 
     env.mock_all_auths();
 
-    let refund_id = client
-        .request_refund(&merchant, &payment_id, &customer, &amount, &amount, &token, &reason);
+    let refund_id = client.request_refund(
+        &merchant,
+        &payment_id,
+        &customer,
+        &amount,
+        &amount,
+        &token,
+        &reason,
+    );
 
     client.reject_refund(&admin, &refund_id, &rejection_reason);
     client.approve_refund(&admin, &refund_id);
@@ -461,8 +597,15 @@ fn test_reject_approved_refund_should_fail() {
 
     env.mock_all_auths();
 
-    let refund_id = client
-        .request_refund(&merchant, &payment_id, &customer, &amount, &amount, &token, &reason);
+    let refund_id = client.request_refund(
+        &merchant,
+        &payment_id,
+        &customer,
+        &amount,
+        &amount,
+        &token,
+        &reason,
+    );
 
     client.approve_refund(&admin, &refund_id);
     client.reject_refund(&admin, &refund_id, &rejection_reason);
@@ -484,8 +627,15 @@ fn test_refund_approved_event_is_emitted() {
 
     env.mock_all_auths();
 
-    let refund_id = client
-        .request_refund(&merchant, &payment_id, &customer, &amount, &amount, &token, &reason);
+    let refund_id = client.request_refund(
+        &merchant,
+        &payment_id,
+        &customer,
+        &amount,
+        &amount,
+        &token,
+        &reason,
+    );
 
     client.approve_refund(&admin, &refund_id);
 
@@ -510,8 +660,15 @@ fn test_refund_rejected_event_is_emitted() {
 
     env.mock_all_auths();
 
-    let refund_id = client
-        .request_refund(&merchant, &payment_id, &customer, &amount, &amount, &token, &reason);
+    let refund_id = client.request_refund(
+        &merchant,
+        &payment_id,
+        &customer,
+        &amount,
+        &amount,
+        &token,
+        &reason,
+    );
 
     client.reject_refund(&admin, &refund_id, &rejection_reason);
 
@@ -535,12 +692,33 @@ fn test_approve_correct_refund_among_multiple() {
 
     env.mock_all_auths();
 
-    let refund_id1 = client
-        .request_refund(&merchant, &payment_id, &customer, &amount, &amount, &token, &reason);
-    let refund_id2 = client
-        .request_refund(&merchant, &payment_id, &customer, &amount, &amount, &token, &reason);
-    let refund_id3 = client
-        .request_refund(&merchant, &payment_id, &customer, &amount, &amount, &token, &reason);
+    let refund_id1 = client.request_refund(
+        &merchant,
+        &payment_id,
+        &customer,
+        &amount,
+        &amount,
+        &token,
+        &reason,
+    );
+    let refund_id2 = client.request_refund(
+        &merchant,
+        &payment_id,
+        &customer,
+        &amount,
+        &amount,
+        &token,
+        &reason,
+    );
+    let refund_id3 = client.request_refund(
+        &merchant,
+        &payment_id,
+        &customer,
+        &amount,
+        &amount,
+        &token,
+        &reason,
+    );
 
     client.approve_refund(&admin, &refund_id2);
 
@@ -570,8 +748,15 @@ fn test_reject_refund_with_empty_reason() {
 
     env.mock_all_auths();
 
-    let refund_id = client
-        .request_refund(&merchant, &payment_id, &customer, &amount, &amount, &token, &reason);
+    let refund_id = client.request_refund(
+        &merchant,
+        &payment_id,
+        &customer,
+        &amount,
+        &amount,
+        &token,
+        &reason,
+    );
 
     client.reject_refund(&admin, &refund_id, &rejection_reason);
 
@@ -596,8 +781,15 @@ fn test_reject_refund_with_detailed_reason() {
 
     env.mock_all_auths();
 
-    let refund_id = client
-        .request_refund(&merchant, &payment_id, &customer, &amount, &amount, &token, &reason);
+    let refund_id = client.request_refund(
+        &merchant,
+        &payment_id,
+        &customer,
+        &amount,
+        &amount,
+        &token,
+        &reason,
+    );
 
     client.reject_refund(&admin, &refund_id, &rejection_reason);
 
@@ -1037,4 +1229,382 @@ fn test_can_refund_payment_helper_rejects_overflow() {
     client.process_refund(&admin, &refund_id);
 
     client.can_refund_payment(&payment_id, &200i128, &original_payment_amount);
+}
+
+#[test]
+fn test_arbitration_quorum() {
+    let env = Env::default();
+    let contract_id = env.register(RefundContract, ());
+    let client = RefundContractClient::new(&env, &contract_id);
+
+    env.mock_all_auths();
+
+    // setup admin, arbitrators, rejected refund
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let arb1 = Address::generate(&env);
+    let arb2 = Address::generate(&env);
+    let arb3 = Address::generate(&env);
+    client.register_arbitrator(&admin, &arb1);
+    client.register_arbitrator(&admin, &arb2);
+    client.register_arbitrator(&admin, &arb3);
+
+    // create rejected refund (simplified via direct request + reject)
+    let merchant = Address::generate(&env);
+    let customer = Address::generate(&env);
+    let token = Address::generate(&env);
+    let refund_id = client.request_refund(
+        &merchant,
+        &1u64,
+        &customer,
+        &1000i128,
+        &1000i128,
+        &token,
+        &String::from_str(&env, "reason"),
+    );
+    client.reject_refund(&admin, &refund_id, &String::from_str(&env, "rejected"));
+
+    // Pool Token
+    let token_admin = Address::generate(&env);
+    let contract_address = env.register_stellar_asset_contract_v2(token_admin.clone());
+    let token_address = contract_address.address();
+    let _token_client = token::Client::new(&env, &token_address);
+    let admin_client = token::StellarAssetClient::new(&env, &token_address);
+
+    admin_client.mint(&customer, &1000_i128);
+
+    let case_id = client.escalate_to_arbitration(&customer, &refund_id, &token_address, &300i128);
+
+    // only 2 votes < quorum 3
+    client.cast_arbitration_vote(&arb1, &case_id, &true, &BytesN::from_array(&env, &[0; 32]));
+    client.cast_arbitration_vote(&arb2, &case_id, &true, &BytesN::from_array(&env, &[0; 32]));
+
+    assert!(client.try_close_arbitration_case(&case_id).is_err()); // fails quorum
+}
+
+#[test]
+fn test_arbitration_deadline_enforcement() {
+    let env = Env::default();
+    let contract_id = env.register(RefundContract, ());
+    let client = RefundContractClient::new(&env, &contract_id);
+
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let arb1 = Address::generate(&env);
+    let arb2 = Address::generate(&env);
+    let arb3 = Address::generate(&env);
+    client.register_arbitrator(&admin, &arb1);
+    client.register_arbitrator(&admin, &arb2);
+    client.register_arbitrator(&admin, &arb3);
+
+    // create rejected refund (simplified via direct request + reject)
+    let merchant = Address::generate(&env);
+    let customer = Address::generate(&env);
+    let token = Address::generate(&env);
+    let refund_id = client.request_refund(
+        &merchant,
+        &1u64,
+        &customer,
+        &1000i128,
+        &1000i128,
+        &token,
+        &String::from_str(&env, "reason"),
+    );
+    client.reject_refund(&admin, &refund_id, &String::from_str(&env, "rejected"));
+
+    // Pool Token
+    let token_admin = Address::generate(&env);
+    let contract_address = env.register_stellar_asset_contract_v2(token_admin.clone());
+    let token_address = contract_address.address();
+    let _token_client = token::Client::new(&env, &token_address);
+    let admin_client = token::StellarAssetClient::new(&env, &token_address);
+
+    admin_client.mint(&customer, &1000_i128);
+
+    let case_id = client.escalate_to_arbitration(&customer, &refund_id, &token_address, &300i128);
+
+    client.cast_arbitration_vote(&arb1, &case_id, &true, &BytesN::from_array(&env, &[0; 32]));
+    env.ledger().set_timestamp(8 * 86400);
+
+    assert!(client
+        .try_cast_arbitration_vote(&arb2, &case_id, &true, &BytesN::from_array(&env, &[0; 32]))
+        .is_err());
+}
+
+#[test]
+fn test_arbitration_success_fee_distribution() {
+    let env = Env::default();
+    let contract_id = env.register(RefundContract, ());
+    let client = RefundContractClient::new(&env, &contract_id);
+
+    env.mock_all_auths();
+
+    // setup admin, arbitrators, rejected refund
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let arb1 = Address::generate(&env);
+    let arb2 = Address::generate(&env);
+    let arb3 = Address::generate(&env);
+    client.register_arbitrator(&admin, &arb1);
+    client.register_arbitrator(&admin, &arb2);
+    client.register_arbitrator(&admin, &arb3);
+
+    // create rejected refund (simplified via direct request + reject)
+    let merchant = Address::generate(&env);
+    let customer = Address::generate(&env);
+    let token = Address::generate(&env);
+    let refund_id = client.request_refund(
+        &merchant,
+        &1u64,
+        &customer,
+        &1000i128,
+        &1000i128,
+        &token,
+        &String::from_str(&env, "reason"),
+    );
+    client.reject_refund(&admin, &refund_id, &String::from_str(&env, "rejected"));
+
+    // Pool Token
+    let token_admin = Address::generate(&env);
+    let contract_address = env.register_stellar_asset_contract_v2(token_admin.clone());
+    let token_address = contract_address.address();
+    let token_client = token::Client::new(&env, &token_address);
+    let admin_client = token::StellarAssetClient::new(&env, &token_address);
+
+    admin_client.mint(&customer, &1000_i128);
+
+    let customer_bal = token_client.balance(&customer);
+    let case_id = client.escalate_to_arbitration(&customer, &refund_id, &token_address, &300i128);
+
+    client.cast_arbitration_vote(&arb1, &case_id, &true, &BytesN::from_array(&env, &[0; 32]));
+    client.cast_arbitration_vote(&arb2, &case_id, &true, &BytesN::from_array(&env, &[0; 32]));
+    client.cast_arbitration_vote(&arb3, &case_id, &true, &BytesN::from_array(&env, &[0; 32]));
+
+    client.close_arbitration_case(&case_id);
+
+    let arbitration_case = client.get_arbitration_case(&case_id);
+    assert_eq!(arbitration_case.status, ArbitrationStatus::Decided);
+
+    let customer_bal = token_client.balance(&customer);
+
+    let arb1_bal = token_client.balance(&arb1);
+    assert_eq!(arb1_bal, 100);
+    let arb2_bal = token_client.balance(&arb2);
+    assert_eq!(arb2_bal, 100);
+    let arb3_bal = token_client.balance(&arb3);
+    assert_eq!(arb3_bal, 100);
+}
+
+#[test]
+fn test_arbitration_arbitrator_cannot_vote() {
+    let env = Env::default();
+    let contract_id = env.register(RefundContract, ());
+    let client = RefundContractClient::new(&env, &contract_id);
+
+    env.mock_all_auths();
+
+    // setup admin, arbitrators, rejected refund
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let arb1 = Address::generate(&env);
+    let arb2 = Address::generate(&env);
+    let arb3 = Address::generate(&env);
+    let customer = Address::generate(&env);
+
+    client.register_arbitrator(&admin, &arb1);
+    client.register_arbitrator(&admin, &arb2);
+    client.register_arbitrator(&admin, &customer);
+
+    // create rejected refund (simplified via direct request + reject)
+    let merchant = Address::generate(&env);
+    let token = Address::generate(&env);
+    let refund_id = client.request_refund(
+        &merchant,
+        &1u64,
+        &customer,
+        &1000i128,
+        &1000i128,
+        &token,
+        &String::from_str(&env, "reason"),
+    );
+    client.reject_refund(&admin, &refund_id, &String::from_str(&env, "rejected"));
+
+    // Pool Token
+    let token_admin = Address::generate(&env);
+    let contract_address = env.register_stellar_asset_contract_v2(token_admin.clone());
+    let token_address = contract_address.address();
+    let token_client = token::Client::new(&env, &token_address);
+    let admin_client = token::StellarAssetClient::new(&env, &token_address);
+
+    admin_client.mint(&customer, &1000_i128);
+
+    let customer_bal = token_client.balance(&customer);
+
+    let case_id = client.escalate_to_arbitration(&customer, &refund_id, &token_address, &300i128);
+
+    client.cast_arbitration_vote(&arb1, &case_id, &true, &BytesN::from_array(&env, &[0; 32]));
+    client.cast_arbitration_vote(&arb2, &case_id, &true, &BytesN::from_array(&env, &[0; 32]));
+    assert!(client
+        .try_cast_arbitration_vote(
+            &customer,
+            &case_id,
+            &true,
+            &BytesN::from_array(&env, &[0; 32])
+        )
+        .is_err());
+}
+
+#[test]
+fn test_arbitration_outcome_execution_approved() {
+    let env = Env::default();
+    let contract_id = env.register(RefundContract, ());
+    let client = RefundContractClient::new(&env, &contract_id);
+
+    env.mock_all_auths();
+
+    // setup admin, arbitrators, rejected refund
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let arb1 = Address::generate(&env);
+    let arb2 = Address::generate(&env);
+    let arb3 = Address::generate(&env);
+    client.register_arbitrator(&admin, &arb1);
+    client.register_arbitrator(&admin, &arb2);
+    client.register_arbitrator(&admin, &arb3);
+
+    // create rejected refund (simplified via direct request + reject)
+    let merchant = Address::generate(&env);
+    let customer = Address::generate(&env);
+    let token = Address::generate(&env);
+    let refund_id = client.request_refund(
+        &merchant,
+        &1u64,
+        &customer,
+        &1000i128,
+        &1000i128,
+        &token,
+        &String::from_str(&env, "reason"),
+    );
+    client.reject_refund(&admin, &refund_id, &String::from_str(&env, "rejected"));
+
+    // Pool Token
+    let token_admin = Address::generate(&env);
+    let contract_address = env.register_stellar_asset_contract_v2(token_admin.clone());
+    let token_address = contract_address.address();
+    let token_client = token::Client::new(&env, &token_address);
+    let admin_client = token::StellarAssetClient::new(&env, &token_address);
+
+    admin_client.mint(&customer, &1000_i128);
+
+    let customer_bal = token_client.balance(&customer);
+
+    let case_id = client.escalate_to_arbitration(&customer, &refund_id, &token_address, &300i128);
+
+    client.cast_arbitration_vote(&arb1, &case_id, &true, &BytesN::from_array(&env, &[0; 32]));
+    client.cast_arbitration_vote(&arb2, &case_id, &true, &BytesN::from_array(&env, &[0; 32]));
+    client.cast_arbitration_vote(&arb3, &case_id, &true, &BytesN::from_array(&env, &[0; 32]));
+
+    client.close_arbitration_case(&case_id);
+
+    let arbitration_case = client.get_arbitration_case(&case_id);
+    assert_eq!(arbitration_case.status, ArbitrationStatus::Decided);
+
+    let customer_bal = token_client.balance(&customer);
+
+    let arb1_bal = token_client.balance(&arb1);
+    assert_eq!(arb1_bal, 100);
+    let arb2_bal = token_client.balance(&arb2);
+    assert_eq!(arb2_bal, 100);
+    let arb3_bal = token_client.balance(&arb3);
+    assert_eq!(arb3_bal, 100);
+
+    let refund = client.get_refund(&refund_id);
+    assert_eq!(refund.id, refund_id);
+    assert_eq!(refund.merchant, merchant);
+    assert_eq!(refund.customer, customer);
+    assert_eq!(refund.amount, 1000i128);
+    assert_eq!(refund.original_payment_amount, 1000i128);
+    assert_eq!(refund.token, token);
+    assert_eq!(refund.status, RefundStatus::Approved);
+}
+
+#[test]
+fn test_arbitration_outcome_execution_rejected() {
+    let env = Env::default();
+    let contract_id = env.register(RefundContract, ());
+    let client = RefundContractClient::new(&env, &contract_id);
+
+    env.mock_all_auths();
+
+    // setup admin, arbitrators, rejected refund
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let arb1 = Address::generate(&env);
+    let arb2 = Address::generate(&env);
+    let arb3 = Address::generate(&env);
+    client.register_arbitrator(&admin, &arb1);
+    client.register_arbitrator(&admin, &arb2);
+    client.register_arbitrator(&admin, &arb3);
+
+    // create rejected refund (simplified via direct request + reject)
+    let merchant = Address::generate(&env);
+    let customer = Address::generate(&env);
+    let token = Address::generate(&env);
+    let refund_id = client.request_refund(
+        &merchant,
+        &1u64,
+        &customer,
+        &1000i128,
+        &1000i128,
+        &token,
+        &String::from_str(&env, "reason"),
+    );
+    client.reject_refund(&admin, &refund_id, &String::from_str(&env, "rejected"));
+
+    // Pool Token
+    let token_admin = Address::generate(&env);
+    let contract_address = env.register_stellar_asset_contract_v2(token_admin.clone());
+    let token_address = contract_address.address();
+    let token_client = token::Client::new(&env, &token_address);
+    let admin_client = token::StellarAssetClient::new(&env, &token_address);
+
+    admin_client.mint(&customer, &1000_i128);
+
+    let customer_bal = token_client.balance(&customer);
+
+    let case_id = client.escalate_to_arbitration(&customer, &refund_id, &token_address, &300i128);
+
+    client.cast_arbitration_vote(&arb1, &case_id, &true, &BytesN::from_array(&env, &[0; 32]));
+    client.cast_arbitration_vote(&arb2, &case_id, &false, &BytesN::from_array(&env, &[0; 32]));
+    client.cast_arbitration_vote(&arb3, &case_id, &false, &BytesN::from_array(&env, &[0; 32]));
+
+    client.close_arbitration_case(&case_id);
+
+    let arbitration_case = client.get_arbitration_case(&case_id);
+    assert_eq!(arbitration_case.status, ArbitrationStatus::Decided);
+
+    let customer_bal = token_client.balance(&customer);
+
+    let arb1_bal = token_client.balance(&arb1);
+    assert_eq!(arb1_bal, 100);
+    let arb2_bal = token_client.balance(&arb2);
+    assert_eq!(arb2_bal, 100);
+    let arb3_bal = token_client.balance(&arb3);
+    assert_eq!(arb3_bal, 100);
+
+    let refund = client.get_refund(&refund_id);
+    assert_eq!(refund.id, refund_id);
+    assert_eq!(refund.merchant, merchant);
+    assert_eq!(refund.customer, customer);
+    assert_eq!(refund.amount, 1000i128);
+    assert_eq!(refund.original_payment_amount, 1000i128);
+    assert_eq!(refund.token, token);
+    assert_eq!(refund.status, RefundStatus::Rejected);
 }
