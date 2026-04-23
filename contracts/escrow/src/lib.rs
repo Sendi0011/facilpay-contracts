@@ -871,7 +871,8 @@ impl EscrowContract {
         env.storage().instance().set(
             &DataKey::MerchantEscrowCount(merchant.clone()),
             &(merchant_count + 1),
-        );\n
+        );
+
         // Update analytics
         let mut analytics: EscrowAnalytics = env.storage().instance()
             .get(&DataKey::EscrowAnalyticsKey)
@@ -882,7 +883,8 @@ impl EscrowContract {
             });
         analytics.total_escrows_created += 1;
         analytics.total_locked_volume += amount;
-        env.storage().instance().set(&DataKey::EscrowAnalyticsKey, &analytics);\n
+        env.storage().instance().set(&DataKey::EscrowAnalyticsKey, &analytics);
+
         EscrowCreated {
             escrow_id,
             customer,
