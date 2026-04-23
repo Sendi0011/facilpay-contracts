@@ -26,6 +26,12 @@ pub enum DataKey {
     TimeLockAction(u64),
     TimeLockCounter,
     TimeLockConfig,
+    // Analytics
+    EscrowAnalyticsKey,
+    // Pause system
+    PauseStateKey,
+    PauseHistoryEntry(u64),
+    PauseHistoryCount,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -69,6 +75,8 @@ pub enum Error {
     ActionExpired = 27,
     ActionAlreadyExecuted = 28,
     ActionCancelled = 29,
+    ContractPaused = 30,
+    FunctionPaused = 31,
 }
 
 #[contractevent]
@@ -415,6 +423,68 @@ pub struct TimeLockActionCancelled {
 pub struct TimeLockConfigUpdated {
     pub delay: u64,
     pub grace_period: u64,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContractPausedEvent {
+    pub paused_by: Address,
+    pub reason: String,
+    pub paused_at: u64,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContractUnpausedEvent {
+    pub unpaused_by: Address,
+    pub unpaused_at: u64,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FunctionPausedEvent {
+    pub function_name: String,
+    pub paused_by: Address,
+    pub reason: String,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FunctionUnpausedEvent {
+    pub function_name: String,
+    pub unpaused_by: Address,
+}
+
+#[derive(Clone)]
+#[contracttype]
+pub struct EscrowAnalytics {
+    pub total_escrows_created: u64,
+    pub total_escrows_released: u64,
+    pub total_disputes_initiated: u64,
+    pub total_disputes_resolved: u64,
+    pub dispute_rate_bps: u32,
+    pub total_locked_volume: i128,
+}
+
+#[derive(Clone)]
+#[contracttype]
+pub struct PauseState {
+    pub globally_paused: bool,
+    pub paused_functions: Vec<String>,
+    pub paused_at: u64,
+    pub paused_by: Address,
+    pub pause_reason: String,
+}
+
+#[derive(Clone)]
+#[contracttype]
+pub struct PauseHistory {
+    pub index: u64,
+    pub function_name: String,
+    pub paused: bool,
+    pub changed_by: Address,
+    pub changed_at: u64,
+    pub reason: String,
 }
 
 #[contract]
@@ -801,8 +871,18 @@ impl EscrowContract {
         env.storage().instance().set(
             &DataKey::MerchantEscrowCount(merchant.clone()),
             &(merchant_count + 1),
-        );
-
+        );\n
+        // Update analytics
+        let mut analytics: EscrowAnalytics = env.storage().instance()
+            .get(&DataKey::EscrowAnalyticsKey)
+            .unwrap_or(EscrowAnalytics {
+                total_escrows_created: 0, total_escrows_released: 0,
+                total_disputes_initiated: 0, total_disputes_resolved: 0,
+                dispute_rate_bps: 0, total_locked_volume: 0,
+            });
+        analytics.total_escrows_created += 1;
+        analytics.total_locked_volume += amount;
+        env.storage().instance().set(&DataKey::EscrowAnalyticsKey, &analytics);\n
         EscrowCreated {
             escrow_id,
             customer,
@@ -1073,6 +1153,17 @@ impl EscrowContract {
         EscrowContract::update_reputation_on_completion(&env, &escrow.merchant);
         EscrowContract::update_reputation_on_completion(&env, &escrow.customer);
 
+        // Update analytics
+        let mut analytics: EscrowAnalytics = env.storage().instance()
+            .get(&DataKey::EscrowAnalyticsKey)
+            .unwrap_or(EscrowAnalytics {
+                total_escrows_created: 0, total_escrows_released: 0,
+                total_disputes_initiated: 0, total_disputes_resolved: 0,
+                dispute_rate_bps: 0, total_locked_volume: 0,
+            });
+        analytics.total_escrows_released += 1;
+        env.storage().instance().set(&DataKey::EscrowAnalyticsKey, &analytics);
+
         EscrowReleased {
             escrow_id,
             merchant: escrow.merchant,
@@ -1146,6 +1237,20 @@ impl EscrowContract {
         env.storage()
             .instance()
             .set(&DataKey::Escrow(escrow_id), &escrow);
+
+        // Update analytics
+        let mut analytics: EscrowAnalytics = env.storage().instance()
+            .get(&DataKey::EscrowAnalyticsKey)
+            .unwrap_or(EscrowAnalytics {
+                total_escrows_created: 0, total_escrows_released: 0,
+                total_disputes_initiated: 0, total_disputes_resolved: 0,
+                dispute_rate_bps: 0, total_locked_volume: 0,
+            });
+        analytics.total_disputes_initiated += 1;
+        analytics.dispute_rate_bps = if analytics.total_escrows_created > 0 {
+            ((analytics.total_disputes_initiated as u64 * 10000) / analytics.total_escrows_created) as u32
+        } else { 0 };
+        env.storage().instance().set(&DataKey::EscrowAnalyticsKey, &analytics);
 
         EscrowDisputed {
             escrow_id,
@@ -1356,6 +1461,20 @@ impl EscrowContract {
             (escrow.customer.clone(), escrow.merchant.clone())
         };
         EscrowContract::update_reputation_on_dispute_outcome(&env, &winner, &loser);
+
+        // Update analytics
+        let mut analytics: EscrowAnalytics = env.storage().instance()
+            .get(&DataKey::EscrowAnalyticsKey)
+            .unwrap_or(EscrowAnalytics {
+                total_escrows_created: 0, total_escrows_released: 0,
+                total_disputes_initiated: 0, total_disputes_resolved: 0,
+                dispute_rate_bps: 0, total_locked_volume: 0,
+            });
+        analytics.total_disputes_resolved += 1;
+        analytics.dispute_rate_bps = if analytics.total_escrows_created > 0 {
+            ((analytics.total_disputes_initiated as u64 * 10000) / analytics.total_escrows_created) as u32
+        } else { 0 };
+        env.storage().instance().set(&DataKey::EscrowAnalyticsKey, &analytics);
 
         EscrowResolved {
             escrow_id,
@@ -2267,6 +2386,221 @@ impl EscrowContract {
             grace_period: config.grace_period,
         }.publish(&env);
 
+        Ok(())
+    }
+
+    // ── ANALYTICS FUNCTIONS ────────────────────────────────────────────────
+
+    pub fn get_escrow_analytics(env: Env) -> EscrowAnalytics {
+        env.storage().instance()
+            .get(&DataKey::EscrowAnalyticsKey)
+            .unwrap_or(EscrowAnalytics {
+                total_escrows_created: 0, total_escrows_released: 0,
+                total_disputes_initiated: 0, total_disputes_resolved: 0,
+                dispute_rate_bps: 0, total_locked_volume: 0,
+            })
+    }
+
+    // ── PAUSE FUNCTIONS ────────────────────────────────────────────────────
+
+    pub fn pause_contract(env: Env, admin: Address, reason: String) -> Result<(), Error> {
+        admin.require_auth();
+        let config: MultiSigConfig = env.storage().instance()
+            .get(&DataKey::MultiSigConfig)
+            .ok_or(Error::MultiSigNotInitialized)?;
+        if !config.admins.contains(&admin) {
+            return Err(Error::Unauthorized);
+        }
+        let now = env.ledger().timestamp();
+        let pause_state = if let Some(mut state) = env.storage().instance()
+            .get::<DataKey, PauseState>(&DataKey::PauseStateKey) {
+            state.globally_paused = true;
+            state.paused_at = now;
+            state.paused_by = admin.clone();
+            state.pause_reason = reason.clone();
+            state
+        } else {
+            PauseState {
+                globally_paused: true,
+                paused_functions: Vec::new(&env),
+                paused_at: now,
+                paused_by: admin.clone(),
+                pause_reason: reason.clone(),
+            }
+        };
+        env.storage().instance().set(&DataKey::PauseStateKey, &pause_state);
+        let history_count: u64 = env.storage().instance()
+            .get(&DataKey::PauseHistoryCount)
+            .unwrap_or(0);
+        let entry = PauseHistory {
+            index: history_count,
+            function_name: String::from_str(&env, "global"),
+            paused: true,
+            changed_by: admin.clone(),
+            changed_at: now,
+            reason: reason.clone(),
+        };
+        env.storage().instance().set(&DataKey::PauseHistoryEntry(history_count), &entry);
+        env.storage().instance().set(&DataKey::PauseHistoryCount, &(history_count + 1));
+        (ContractPausedEvent { paused_by: admin, reason, paused_at: now }).publish(&env);
+        Ok(())
+    }
+
+    pub fn unpause_contract(env: Env, admin: Address) -> Result<(), Error> {
+        admin.require_auth();
+        let config: MultiSigConfig = env.storage().instance()
+            .get(&DataKey::MultiSigConfig)
+            .ok_or(Error::MultiSigNotInitialized)?;
+        if !config.admins.contains(&admin) {
+            return Err(Error::Unauthorized);
+        }
+        if let Some(mut state) = env.storage().instance()
+            .get::<DataKey, PauseState>(&DataKey::PauseStateKey) {
+            state.globally_paused = false;
+            env.storage().instance().set(&DataKey::PauseStateKey, &state);
+        }
+        let now = env.ledger().timestamp();
+        let history_count: u64 = env.storage().instance()
+            .get(&DataKey::PauseHistoryCount)
+            .unwrap_or(0);
+        let entry = PauseHistory {
+            index: history_count,
+            function_name: String::from_str(&env, "global"),
+            paused: false,
+            changed_by: admin.clone(),
+            changed_at: now,
+            reason: String::from_str(&env, ""),
+        };
+        env.storage().instance().set(&DataKey::PauseHistoryEntry(history_count), &entry);
+        env.storage().instance().set(&DataKey::PauseHistoryCount, &(history_count + 1));
+        (ContractUnpausedEvent { unpaused_by: admin, unpaused_at: now }).publish(&env);
+        Ok(())
+    }
+
+    pub fn pause_function(
+        env: Env,
+        admin: Address,
+        function_name: String,
+        reason: String,
+    ) -> Result<(), Error> {
+        admin.require_auth();
+        let config: MultiSigConfig = env.storage().instance()
+            .get(&DataKey::MultiSigConfig)
+            .ok_or(Error::MultiSigNotInitialized)?;
+        if !config.admins.contains(&admin) {
+            return Err(Error::Unauthorized);
+        }
+        let now = env.ledger().timestamp();
+        let mut pause_state = if let Some(state) = env.storage().instance()
+            .get::<DataKey, PauseState>(&DataKey::PauseStateKey) {
+            state
+        } else {
+            PauseState {
+                globally_paused: false,
+                paused_functions: Vec::new(&env),
+                paused_at: 0,
+                paused_by: admin.clone(),
+                pause_reason: String::from_str(&env, ""),
+            }
+        };
+        if !pause_state.paused_functions.contains(&function_name) {
+            pause_state.paused_functions.push_back(function_name.clone());
+        }
+        env.storage().instance().set(&DataKey::PauseStateKey, &pause_state);
+        let history_count: u64 = env.storage().instance()
+            .get(&DataKey::PauseHistoryCount)
+            .unwrap_or(0);
+        let entry = PauseHistory {
+            index: history_count,
+            function_name: function_name.clone(),
+            paused: true,
+            changed_by: admin.clone(),
+            changed_at: now,
+            reason: reason.clone(),
+        };
+        env.storage().instance().set(&DataKey::PauseHistoryEntry(history_count), &entry);
+        env.storage().instance().set(&DataKey::PauseHistoryCount, &(history_count + 1));
+        (FunctionPausedEvent { function_name, paused_by: admin, reason }).publish(&env);
+        Ok(())
+    }
+
+    pub fn unpause_function(
+        env: Env,
+        admin: Address,
+        function_name: String,
+    ) -> Result<(), Error> {
+        admin.require_auth();
+        let config: MultiSigConfig = env.storage().instance()
+            .get(&DataKey::MultiSigConfig)
+            .ok_or(Error::MultiSigNotInitialized)?;
+        if !config.admins.contains(&admin) {
+            return Err(Error::Unauthorized);
+        }
+        if let Some(mut state) = env.storage().instance()
+            .get::<DataKey, PauseState>(&DataKey::PauseStateKey) {
+            let mut new_paused = Vec::new(&env);
+            for fn_name in state.paused_functions.iter() {
+                if fn_name != function_name {
+                    new_paused.push_back(fn_name);
+                }
+            }
+            state.paused_functions = new_paused;
+            env.storage().instance().set(&DataKey::PauseStateKey, &state);
+        }
+        let now = env.ledger().timestamp();
+        let history_count: u64 = env.storage().instance()
+            .get(&DataKey::PauseHistoryCount)
+            .unwrap_or(0);
+        let entry = PauseHistory {
+            index: history_count,
+            function_name: function_name.clone(),
+            paused: false,
+            changed_by: admin.clone(),
+            changed_at: now,
+            reason: String::from_str(&env, ""),
+        };
+        env.storage().instance().set(&DataKey::PauseHistoryEntry(history_count), &entry);
+        env.storage().instance().set(&DataKey::PauseHistoryCount, &(history_count + 1));
+        (FunctionUnpausedEvent { function_name, unpaused_by: admin }).publish(&env);
+        Ok(())
+    }
+
+    pub fn get_pause_state(env: Env) -> PauseState {
+        env.storage().instance()
+            .get(&DataKey::PauseStateKey)
+            .unwrap_or(PauseState {
+                globally_paused: false,
+                paused_functions: Vec::new(&env),
+                paused_at: 0,
+                paused_by: env.current_contract_address(),
+                pause_reason: String::from_str(&env, ""),
+            })
+    }
+
+    pub fn is_function_paused(env: Env, function_name: String) -> bool {
+        if let Some(state) = env.storage().instance()
+            .get::<DataKey, PauseState>(&DataKey::PauseStateKey) {
+            if state.globally_paused { return true; }
+            for fn_name in state.paused_functions.iter() {
+                if fn_name == function_name { return true; }
+            }
+        }
+        false
+    }
+
+    fn require_not_paused(env: &Env, function_name: &str) -> Result<(), Error> {
+        if let Some(state) = env.storage().instance()
+            .get::<DataKey, PauseState>(&DataKey::PauseStateKey) {
+            if state.globally_paused {
+                return Err(Error::ContractPaused);
+            }
+            let fn_str = String::from_str(env, function_name);
+            for fn_name in state.paused_functions.iter() {
+                if fn_name == fn_str {
+                    return Err(Error::FunctionPaused);
+                }
+            }
+        }
         Ok(())
     }
 
